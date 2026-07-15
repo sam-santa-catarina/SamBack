@@ -176,7 +176,9 @@ class AuthController {
                     const minutosRestantes = Math.ceil((new Date(acceso.bloqueado_hasta).getTime() - Date.now()) / 60000);
                     return res.status(423).json({
                         message: `Cuenta bloqueada. Intente nuevamente en ${minutosRestantes} minutos`,
-                        bloqueado_hasta: acceso.bloqueado_hasta,
+                        bloqueado_hasta: acceso.bloqueado_hasta
+                          ? new Date(acceso.bloqueado_hasta).toISOString()
+                          : null,
                         code: 'ACCOUNT_LOCKED'
                     });
                 } else {

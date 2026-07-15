@@ -27,12 +27,12 @@ CREATE TABLE usuario."tUsuario" (
 CREATE TABLE usuario."tAcceso" (
     id_acceso INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     id_usuario INT UNIQUE NOT NULL REFERENCES usuario."tUsuario"(id_usuario) ON DELETE CASCADE,
-    ultimo_acceso TIMESTAMP,
-    ultimo_intento_fallido TIMESTAMP,
+    ultimo_acceso TIMESTAMPTZ,
+    ultimo_intento_fallido TIMESTAMPTZ,
     intentos_fallidos INT DEFAULT 0 CHECK (intentos_fallidos >= 0),
-    bloqueado_hasta TIMESTAMP, -- NULL = no bloqueado, fecha futura = bloqueado hasta ese momento
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+    bloqueado_hasta TIMESTAMPTZ, -- NULL = no bloqueado, fecha futura = bloqueado hasta ese momento
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE usuario."lUsuario" (
@@ -44,7 +44,7 @@ CREATE TABLE usuario."lUsuario" (
     metodo VARCHAR(100),
     ip_address INET,
     user_agent TEXT,
-    fecha_error_log TIMESTAMP DEFAULT NOW()
+    fecha_error_log TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE usuario."tSesion" (
@@ -53,10 +53,10 @@ CREATE TABLE usuario."tSesion" (
     refresh_token_hash TEXT NOT NULL,
     ip_address INET,
     user_agent TEXT,
-    created_at TIMESTAMP DEFAULT NOW(),
-    expires_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
     revoked BOOLEAN DEFAULT FALSE,
-    revoked_at TIMESTAMP
+    revoked_at TIMESTAMPTZ
 );
 
 

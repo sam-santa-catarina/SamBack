@@ -9,7 +9,7 @@ CREATE TABLE sistema."lSistema" (
     metodo VARCHAR(100),
     ip_address INET,
     user_agent TEXT,
-    fecha_error_log TIMESTAMP DEFAULT NOW()
+    fecha_error_log TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE sistema."tAuditoria" (
@@ -21,7 +21,7 @@ CREATE TABLE sistema."tAuditoria" (
     detalles JSONB,
     ip_address INET,
     user_agent TEXT,
-    fecha TIMESTAMP DEFAULT NOW()
+    fecha TIMESTAMPTZ DEFAULT NOW()
 );
 
 
