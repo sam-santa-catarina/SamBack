@@ -40,6 +40,7 @@ class AuthRoutes {
         this.router.post("/register", registerLimiter, authController.register);
         this.router.post("/login", loginLimiter, authController.login);
         this.router.post("/refresh-token", refreshTokenLimiter, authController.refreshToken);
+        this.router.post("/logout", authController.logout);
         this.router.post("/change-password", authMiddleware, authController.changePassword);
     }
 }

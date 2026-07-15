@@ -14,6 +14,7 @@ class AuthController {
         this.register = this.register.bind(this);
         this.login = this.login.bind(this);
         this.changePassword = this.changePassword.bind(this);
+        this.logout = this.logout.bind(this);
     }
 
     /**
@@ -332,7 +333,6 @@ class AuthController {
                 return res.status(400).json({ message: "Refresh token es requerido" });
             }
 
-            // Verificar que el token JWT sea válido
             let decoded: any;
             try {
                 decoded = verifyRefreshToken(refresh_token);
@@ -345,10 +345,8 @@ class AuthController {
 
             const userId = decoded.id_usuario;
 
-           // Hashear el token recibido para compararlo con el almacenado
             const tokenHash = await hashRefreshToken(refresh_token);
 
-            // Primero: buscar si existe la sesión (sin filtrar por revocada)
             const { data: sesion, error: sessionError } = await supabase
                 .schema('usuario')
                 .from('tSesion')
@@ -362,14 +360,11 @@ class AuthController {
                 return res.status(500).json({ message: "Error al validar la sesión" });
             }
 
-            // Si no existe la sesión con ese hash, token inválido
             if (!sesion) {
                 return res.status(401).json({ message: "Refresh token no válido" });
             }
 
-            // Si la sesión ya estaba revocada, posible robo de token
             if (sesion.revoked) {
-                // Revocar TODAS las sesiones del usuario por seguridad
                 const ahora = new Date();
                 await supabase
                     .schema('usuario')
@@ -378,13 +373,10 @@ class AuthController {
                     .eq('id_usuario', userId)
                     .eq('revoked', false);
 
-
                 return res.status(401).json({ message: "Sesión revocada por seguridad" });
             }
 
-            // Verificar que no haya expirado en BD
             if (new Date(sesion.expires_at) < new Date()) {
-                // Marcar como revocada por expiración
                 await supabase
                     .schema('usuario')
                     .from('tSesion')
@@ -393,11 +385,12 @@ class AuthController {
                 return res.status(401).json({ message: "Refresh token expirado" });
             }
 
-            // Obtener datos actualizados del usuario (por si cambiaron roles o correo)
+            // Se agrega id_estatus_usuario para poder informar requiere_cambio_contrasena,
+            // igual que en login.
             const { data: user, error: userError } = await supabase
                 .schema('usuario')
                 .from('tUsuario')
-                .select('id_usuario, nombre_usuario, correo_electronico, id_rol_usuario')
+                .select('id_usuario, nombre_usuario, correo_electronico, id_rol_usuario, id_estatus_usuario')
                 .eq('id_usuario', userId)
                 .single();
 
@@ -406,7 +399,14 @@ class AuthController {
                 return res.status(401).json({ message: "Usuario no encontrado" });
             }
 
-            // Revocar la sesión actual (rotación de refresh token)
+            // Si la cuenta fue bloqueada o eliminada después de emitido el refresh token, se corta aquí.
+            if (user.id_estatus_usuario === ESTATUS_USUARIO.BLOQUEADO) {
+                return res.status(423).json({ message: "Cuenta bloqueada" });
+            }
+            if (user.id_estatus_usuario === ESTATUS_USUARIO.ELIMINADO) {
+                return res.status(403).json({ message: "Cuenta eliminada" });
+            }
+
             const ahora = new Date();
             const { error: revokeError } = await supabase
                 .schema('usuario')
@@ -418,7 +418,6 @@ class AuthController {
                 await logError(req, revokeError, 'AuthController', 'refreshToken_revoke', 'usuario', 'lUsuario', userId);
             }
 
-            // Generar nuevos tokens
             const tokenPayload: TokenPayload = {
                 id_usuario: user.id_usuario,
                 nombre_usuario: user.nombre_usuario,
@@ -431,12 +430,10 @@ class AuthController {
             const newRefreshTokenHash = await hashRefreshToken(newRefreshToken);
             const expiresAt = getRefreshTokenExpiry();
 
-            // IP y User-Agent limpios
             const rawIp = (req.headers['x-forwarded-for'] as string || req.ip || req.socket.remoteAddress) as string;
             const realIp = rawIp?.split(',')[0]?.trim().replace(/^::ffff:/, '') || '0.0.0.0';
             const userAgent = req.headers['user-agent'] || 'Desconocido';
 
-            // Guardar nueva sesión
             const { error: insertError } = await supabase
                 .schema('usuario')
                 .from('tSesion')
@@ -454,12 +451,10 @@ class AuthController {
                 return res.status(500).json({ message: "Error al crear nueva sesión" });
             }
 
-            // Auditoría de renovación exitosa
             await logAudit(req, 'REFRESH_TOKEN', 'tUsuario', userId, {
                 email: user.correo_electronico
             });
 
-            // Nueva cookie con el nuevo refresh token
             res.cookie('refresh_token', newRefreshToken, {
                 httpOnly: true,
                 secure: process.env.NODE_ENV === 'production',
@@ -470,6 +465,13 @@ class AuthController {
 
             res.status(200).json({
                 message: "Token refrescado exitosamente",
+                user: {
+                    id: user.id_usuario,
+                    nombre_usuario: user.nombre_usuario,
+                    correo_electronico: user.correo_electronico,
+                    id_rol_usuario: user.id_rol_usuario
+                },
+                requiere_cambio_contrasena: user.id_estatus_usuario === ESTATUS_USUARIO.NUEVO,
                 tokens: {
                     access_token: newAccessToken,
                     expires_in: process.env.JWT_ACCESS_EXPIRES_IN
@@ -583,6 +585,58 @@ class AuthController {
         } catch (err: any) {
             await logError(req, err, 'AuthController', 'changePassword', 'usuario', 'lUsuario');
             res.status(500).json({ error: "Error en el servidor" });
+        }
+    }
+
+    /**
+     * POST /api/auth/logout
+     * Revoca la sesión asociada al refresh_token de la cookie
+     * y limpia la cookie. No requiere access_token porque puede
+     * estar expirado al momento de cerrar sesión.
+     */
+    public async logout(req: Request, res: Response) {
+        try {
+            const refresh_token = req.cookies?.refresh_token;
+
+            if (!refresh_token) {
+                // No hay sesión que cerrar en el backend; igual limpiamos por si acaso.
+                res.clearCookie('refresh_token', { path: '/api/auth/refresh-token' });
+                return res.status(200).json({ message: "Sesión cerrada" });
+            }
+
+            let decoded: any;
+            try {
+                decoded = verifyRefreshToken(refresh_token);
+            } catch {
+                decoded = null;
+            }
+
+            if (decoded?.id_usuario) {
+                const tokenHash = await hashRefreshToken(refresh_token);
+
+                const { error: revokeError } = await supabase
+                    .schema('usuario')
+                    .from('tSesion')
+                    .update({ revoked: true, revoked_at: new Date() })
+                    .eq('id_usuario', decoded.id_usuario)
+                    .eq('refresh_token_hash', tokenHash)
+                    .eq('revoked', false);
+
+                if (revokeError) {
+                    await logError(req, revokeError, 'AuthController', 'logout', 'usuario', 'lUsuario', decoded.id_usuario);
+                } else {
+                    await logAudit(req, 'LOGOUT', 'tUsuario', decoded.id_usuario, {});
+                }
+            }
+
+            res.clearCookie('refresh_token', { path: '/api/auth/refresh-token' });
+            res.status(200).json({ message: "Sesión cerrada" });
+
+        } catch (err: any) {
+            await logError(req, err, 'AuthController', 'logout', 'usuario', 'lUsuario');
+            // Aunque falle el log/DB, igual limpiamos la cookie del lado del cliente.
+            res.clearCookie('refresh_token', { path: '/api/auth/refresh-token' });
+            res.status(500).json({ message: "Error al cerrar sesión" });
         }
     }
 

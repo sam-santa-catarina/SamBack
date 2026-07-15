@@ -3,6 +3,8 @@ import morgan from "morgan";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import AuthRoutes from "./routes/authRoutes";
+import { requireEstatusNormal } from "./middlewares/estatusMiddleware";
+import { authMiddleware } from "./middlewares/authMiddleware";
 
 class Server {
     public app: Application;
@@ -30,6 +32,7 @@ class Server {
 
     routes() : void {
         this.app.use("/api/auth", AuthRoutes);
+        this.app.use("/api", authMiddleware, requireEstatusNormal)
     }
 
     start(): void {
