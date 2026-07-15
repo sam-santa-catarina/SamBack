@@ -9,12 +9,19 @@ CREATE TABLE usuario."tRolUsuario" (
     estatus_rol BOOLEAN DEFAULT TRUE
 );
 
+CREATE TABLE usuario."tEstatusUsuario" (
+    id_estatus INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    estado VARCHAR(40) NOT NULL,
+    descripcion VARCHAR(200) NULL
+);
+
 CREATE TABLE usuario."tUsuario" (
     id_usuario INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     nombre_usuario VARCHAR(60) NOT NULL,
     correo_electronico VARCHAR(150) UNIQUE NOT NULL,
     contrasena_hash TEXT NULL,
-    id_rol_usuario INT REFERENCES usuario."tRolUsuario"(id_rol)
+    id_rol_usuario INT REFERENCES usuario."tRolUsuario"(id_rol),
+    id_estatus_usuario INT NOT NULL DEFAULT 1 REFERENCES usuario."tEstatusUsuario"(id_estatus)
 );
 
 CREATE TABLE usuario."tAcceso" (
@@ -71,8 +78,19 @@ VALUES
     'Registra y actualiza la información de los apoyos municipales asignados.'
 );
 
+INSERT INTO usuario."tEstatusUsuario"
+(estado, descripcion)
+VALUES
+('Nuevo', 'El perfil acaba de ser creado'),
+('Normal', 'El perfil está operando de manera normal'),
+('Bloqueado', 'El perfil está bloqueado, no se puede acceder'),
+('Eliminado', 'El perfil ha sido eliminado (no puede acceder)');
+
 
 -- Ínidices
+
+-- Estado
+CREATE INDEX idx_usuario_estatus ON usuario."tUsuario" (id_estatus_usuario);
 
 -- Acceso
 CREATE INDEX idx_acceso_id_usuario ON usuario."tAcceso" (id_usuario);
