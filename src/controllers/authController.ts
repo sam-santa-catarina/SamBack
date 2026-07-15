@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { generateAccessToken, generateRefreshToken, hashRefreshToken, getRefreshTokenExpiry, verifyRefreshToken } from "../utils/tokenUtil";
+import { ESTATUS_USUARIO } from "../constants/estatusUsuario";
 import { TokenPayload } from "../interfaces/tokenInterface";
 import { RegisterUser } from "../interfaces/authInterface";
 import { logError } from "../utils/logError";
@@ -12,6 +13,7 @@ class AuthController {
     constructor() {
         this.register = this.register.bind(this);
         this.login = this.login.bind(this);
+        this.changePassword = this.changePassword.bind(this);
     }
 
     /**
@@ -24,8 +26,7 @@ class AuthController {
 
             const {
                 nombre_usuario,
-                correo_electronico,
-                contrasena
+                correo_electronico
             } = user;
 
             // Limpieza de variables
@@ -35,11 +36,10 @@ class AuthController {
             const errores = [];
             const emailRegex = /^[^\s@]+@([^\s@.,]+\.)+[^\s@.,]{2,}$/;
             const nombreRegex = /^[A-Za-zÁÉÍÓÚáéíóúÜüÑñ]+(?:\s[A-Za-zÁÉÍÓÚáéíóúÜüÑñ]+)*$/;
-            const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9])\S{8,70}$/;
 
             // Validaciones básicas
-            if (!nombre || !correo || !contrasena) {
-                errores.push("Los campos nombre_usuario, correo_electronico y contraseña son obligatorios");
+            if (!nombre || !correo) {
+                errores.push("Los campos nombre_usuario y correo_electronico son obligatorios");
             } else {
                 if (nombre.length < 3 || nombre.length > 60) {
                     errores.push("El nombre de usuario debe tener entre 3 y 60 caracteres");
@@ -56,25 +56,20 @@ class AuthController {
                 if (!emailRegex.test(correo)) {
                     errores.push("El correo electrónico no tiene un formato válido");
                 }
-
-                if (contrasena.length < 8 || contrasena.length > 70) {
-                    errores.push("La contraseña debe tener entre 8 y 70 caracteres");
-                }
-
-                if (!passwordRegex.test(contrasena)) {
-                    errores.push("La contraseña debe tener al menos una letra mayuscula, una letra minuscula, un número, un caracter especial y sin espacios");
-                }
             }
 
             if (errores.length > 0) {
                 return res.status(400).json({ errors: errores });
             }
 
+            // Contraseña por defecto para usuarios nuevos
+            const DEFAULT_PASSWORD = process.env.DEFAULT_USER_PASSWORD || 'password';
+
             // Hash de contraseña
             let contrasena_hash: string;
             try {
                 const saltRounds = process.env.NODE_ENV === 'production' ? 12 : 10;
-                contrasena_hash = await bcrypt.hash(contrasena, saltRounds);
+                contrasena_hash = await bcrypt.hash(DEFAULT_PASSWORD, saltRounds);
             } catch (hashError) {
                 await logError(req, hashError, 'AuthController', 'register', 'usuario', 'lUsuario');
                 return res.status(500).json({ message: "Error interno al procesar la contraseña" });
@@ -146,7 +141,7 @@ class AuthController {
             const { data: user, error: userError } = await supabase
                 .schema('usuario')
                 .from('tUsuario')
-                .select('id_usuario, nombre_usuario, correo_electronico, contrasena_hash, id_rol_usuario')
+                .select('id_usuario, nombre_usuario, correo_electronico, contrasena_hash, id_rol_usuario, id_estatus_usuario')
                 .eq('correo_electronico', correoNormalizado)
                 .maybeSingle();
 
@@ -176,6 +171,9 @@ class AuthController {
                 return res.status(423).json({
                     message: `Cuenta bloqueada. Intente nuevamente en ${minutosRestantes} minutos`
                 });
+            } else {
+                // El tiempo de bloqueo ya venció: se desbloquea el usuario
+                await this.desbloquearUsuario(user.id_usuario, req);
             }
 
             const passwordMatch = await bcrypt.compare(contrasena, user.contrasena_hash);
@@ -298,6 +296,7 @@ class AuthController {
                     nombre_usuario: user.nombre_usuario,
                     correo_electronico: user.correo_electronico
                 },
+                requiere_cambio_contrasena: user.id_estatus_usuario === ESTATUS_USUARIO.NUEVO,
                 tokens: {
                     access_token: accessToken,
                     expires_in: process.env.JWT_ACCESS_EXPIRES_IN
@@ -473,17 +472,119 @@ class AuthController {
     }
 
     /**
+     * POST /api/auth/change-password
+     * Permite al usuario cambiar su propia contraseña.
+     * Requiere autenticación (access_token).
+     */
+    public async changePassword(req: Request, res: Response) {
+        try {
+            const id_usuario = (req as any).user?.id_usuario;
+
+            if (!id_usuario) {
+                return res.status(401).json({ message: "No autorizado" });
+            }
+
+            const { contrasena_actual, contrasena_nueva } = req.body;
+
+            if (!contrasena_actual || !contrasena_nueva) {
+                return res.status(400).json({ message: "La contraseña actual y la nueva son obligatorias" });
+            }
+
+            if (typeof contrasena_nueva !== 'string' || contrasena_nueva.length < 8 || contrasena_nueva.length > 70) {
+                return res.status(400).json({ message: "La nueva contraseña debe tener entre 8 y 70 caracteres" });
+            }
+
+            const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9])\S{8,70}$/;
+            if (!passwordRegex.test(contrasena_nueva)) {
+                return res.status(400).json({
+                    message: "La nueva contraseña debe tener al menos una letra mayuscula, una letra minuscula, un número, un caracter especial y sin espacios"
+                });
+            }
+
+            if (contrasena_nueva === contrasena_actual) {
+                return res.status(400).json({ message: "La nueva contraseña debe ser diferente a la actual" });
+            }
+
+            // Obtener hash actual del usuario
+            const { data: user, error: userError } = await supabase
+                .schema('usuario')
+                .from('tUsuario')
+                .select('contrasena_hash')
+                .eq('id_usuario', id_usuario)
+                .maybeSingle();
+
+            if (userError || !user) {
+                await logError(req, userError || new Error('Usuario no encontrado'), 'AuthController', 'changePassword', 'usuario', 'lUsuario', id_usuario);
+                return res.status(404).json({ message: "Usuario no encontrado" });
+            }
+
+            // Verificar que la contraseña actual sea correcta
+            const passwordMatch = await bcrypt.compare(contrasena_actual, user.contrasena_hash);
+            if (!passwordMatch) {
+                return res.status(401).json({ message: "La contraseña actual es incorrecta" });
+            }
+
+            // Hash de la nueva contraseña
+            let nuevo_hash: string;
+            try {
+                const saltRounds = process.env.NODE_ENV === 'production' ? 12 : 10;
+                nuevo_hash = await bcrypt.hash(contrasena_nueva, saltRounds);
+            } catch (hashError) {
+                await logError(req, hashError, 'AuthController', 'changePassword', 'usuario', 'lUsuario', id_usuario);
+                return res.status(500).json({ message: "Error interno al procesar la contraseña" });
+            }
+
+            // Actualizar contraseña y, si el usuario era Nuevo, pasarlo a Normal
+            const { error: updateError } = await supabase
+                .schema('usuario')
+                .from('tUsuario')
+                .update({
+                    contrasena_hash: nuevo_hash,
+                    id_estatus_usuario: ESTATUS_USUARIO.NORMAL
+                })
+                .eq('id_usuario', id_usuario)
+                .in('id_estatus_usuario', [ESTATUS_USUARIO.NUEVO, ESTATUS_USUARIO.NORMAL]);
+
+            if (updateError) {
+                await logError(req, updateError, 'AuthController', 'changePassword', 'usuario', 'lUsuario', id_usuario);
+                return res.status(500).json({ message: "Error al actualizar la contraseña" });
+            }
+
+            // Por seguridad, revocar todas las sesiones activas (fuerza a re-loguearse en otros dispositivos)
+            const ahora = new Date();
+            const { error: revokeError } = await supabase
+                .schema('usuario')
+                .from('tSesion')
+                .update({ revoked: true, revoked_at: ahora })
+                .eq('id_usuario', id_usuario)
+                .eq('revoked', false);
+
+            if (revokeError) {
+                await logError(req, revokeError, 'AuthController', 'changePassword_revoke_sessions', 'usuario', 'lUsuario', id_usuario);
+            }
+
+            await logAudit(req, 'CHANGE_PASSWORD', 'tUsuario', id_usuario, {});
+
+            res.clearCookie('refresh_token', { path: '/api/auth/refresh-token' });
+
+            res.status(200).json({ message: "Contraseña actualizada exitosamente" });
+
+        } catch (err: any) {
+            await logError(req, err, 'AuthController', 'changePassword', 'usuario', 'lUsuario');
+            res.status(500).json({ error: "Error en el servidor" });
+        }
+    }
+
+    /**
      * Método auxiliar para registrar
      * intentos fallidos y posible bloqueo.
      */
     private async registrarIntentoFallido(id_usuario: number | null, req: Request) {
         if (!id_usuario) {
-            // Si el usuario no existe, solo logueamos el intento (sin asociar a usuario)
             await logError(req, new Error("Intento de login con usuario inexistente"), 'AuthController', 'login_intento_fallido', 'usuario', 'lUsuario');
             return;
         }
 
-        // Obtener intentos actuales
         const { data: acceso, error: fetchError } = await supabase
             .schema('usuario')
             .from('tAcceso')
@@ -497,7 +598,8 @@ class AuthController {
         }
 
         const nuevosIntentos = (acceso?.intentos_fallidos || 0) + 1;
-        const bloqueado_hasta = nuevosIntentos >= 5 ? new Date(Date.now() + 15 * 60 * 1000) : null;
+        const seBloquea = nuevosIntentos >= 5;
+        const bloqueado_hasta = seBloquea ? new Date(Date.now() + 15 * 60 * 1000) : null;
 
         const { error: updateError } = await supabase
             .schema('usuario')
@@ -514,7 +616,55 @@ class AuthController {
             await logError(req, updateError, 'AuthController', 'registrarIntentoFallido', 'usuario', 'lUsuario', id_usuario);
         }
 
+        // Si se acaba de bloquear, reflejarlo en el estatus del usuario
+        if (seBloquea) {
+            const { error: estatusError } = await supabase
+                .schema('usuario')
+                .from('tUsuario')
+                .update({ id_estatus_usuario: ESTATUS_USUARIO.BLOQUEADO })
+                .eq('id_usuario', id_usuario);
+
+            if (estatusError) {
+                await logError(req, estatusError, 'AuthController', 'registrarIntentoFallido_estatus', 'usuario', 'lUsuario', id_usuario);
+            }
+        }
+
         await logError(req, new Error(`Intento fallido #${nuevosIntentos}`), 'AuthController', 'login_fallido', 'usuario', 'lUsuario', id_usuario);
+    }
+
+    /**
+     * Revierte el bloqueo de un usuario una vez que
+     * bloqueado_hasta ya expiró.
+     */
+    private async desbloquearUsuario(id_usuario: number, req: Request) {
+        const ahora = new Date();
+
+        const { error: accesoError } = await supabase
+            .schema('usuario')
+            .from('tAcceso')
+            .update({
+                intentos_fallidos: 0,
+                bloqueado_hasta: null,
+                updated_at: ahora
+            })
+            .eq('id_usuario', id_usuario);
+
+        if (accesoError) {
+            await logError(req, accesoError, 'AuthController', 'desbloquearUsuario_acceso', 'usuario', 'lUsuario', id_usuario);
+        }
+
+        // Solo revertimos si el estatus actual es "Bloqueado",
+        // para no pisar un estatus como "Eliminado"
+        const { error: estatusError } = await supabase
+            .schema('usuario')
+            .from('tUsuario')
+            .update({ id_estatus_usuario: ESTATUS_USUARIO.NORMAL })
+            .eq('id_usuario', id_usuario)
+            .eq('id_estatus_usuario', ESTATUS_USUARIO.BLOQUEADO);
+
+        if (estatusError) {
+            await logError(req, estatusError, 'AuthController', 'desbloquearUsuario_estatus', 'usuario', 'lUsuario', id_usuario);
+        }
     }
 }
 

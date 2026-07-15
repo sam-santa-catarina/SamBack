@@ -1,7 +1,6 @@
 export interface RegisterUser {
     nombre_usuario: string;
     correo_electronico: string;
-    contrasena: string;
     id_rol_usuario?: number;
 }
 

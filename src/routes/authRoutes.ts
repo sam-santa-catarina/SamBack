@@ -1,6 +1,7 @@
 import rateLimit from "express-rate-limit";
 import { Router } from "express";
 import { authController } from "../controllers/authController";
+import { authMiddleware } from "../middlewares/authMiddleware";
 
 const createLimiter = (minutes: number, max: number, message: string) =>
     rateLimit({
@@ -39,6 +40,7 @@ class AuthRoutes {
         this.router.post("/register", registerLimiter, authController.register);
         this.router.post("/login", loginLimiter, authController.login);
         this.router.post("/refresh-token", refreshTokenLimiter, authController.refreshToken);
+        this.router.post("/change-password", authMiddleware, authController.changePassword);
     }
 }
 

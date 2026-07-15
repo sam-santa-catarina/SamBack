@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import bcrypt from 'bcrypt';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { TokenPayload } from '../interfaces/tokenInterface';
 
@@ -42,9 +42,10 @@ export function generateRefreshToken(payload: TokenPayload): string {
 
 /**
  * Hashea un refresh token para almacenarlo en BD
+ * (determinístico, para poder buscarlo por igualdad)
  */
 export async function hashRefreshToken(refreshToken: string): Promise<string> {
-    return await bcrypt.hash(refreshToken, 10);
+    return crypto.createHash('sha256').update(refreshToken).digest('hex');
 }
 
 /**
