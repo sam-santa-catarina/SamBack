@@ -155,6 +155,10 @@ class AuthController {
                 return res.status(401).json({ message: "Credenciales inválidas" });
             }
 
+            if (user.id_estatus_usuario === ESTATUS_USUARIO.ELIMINADO) {
+                return res.status(403).json({ message: "Esta cuenta ha sido eliminada" });
+            }
+
             const { data: acceso, error: accesoError } = await supabase
                 .schema('usuario')
                 .from('tAcceso')
@@ -166,14 +170,19 @@ class AuthController {
                 await logError(req, accesoError, 'AuthController', 'login', 'usuario', 'lUsuario', user.id_usuario);
             }
 
-            if (acceso?.bloqueado_hasta && new Date(acceso.bloqueado_hasta) > new Date()) {
-                const minutosRestantes = Math.ceil((new Date(acceso.bloqueado_hasta).getTime() - Date.now()) / 60000);
-                return res.status(423).json({
-                    message: `Cuenta bloqueada. Intente nuevamente en ${minutosRestantes} minutos`
-                });
-            } else {
-                // El tiempo de bloqueo ya venció: se desbloquea el usuario
-                await this.desbloquearUsuario(user.id_usuario, req);
+            if (acceso?.bloqueado_hasta) {
+                if (new Date(acceso.bloqueado_hasta) > new Date()) {
+                    // Sigue bloqueado
+                    const minutosRestantes = Math.ceil((new Date(acceso.bloqueado_hasta).getTime() - Date.now()) / 60000);
+                    return res.status(423).json({
+                        message: `Cuenta bloqueada. Intente nuevamente en ${minutosRestantes} minutos`,
+                        bloqueado_hasta: acceso.bloqueado_hasta,
+                        code: 'ACCOUNT_LOCKED'
+                    });
+                } else {
+                    // El tiempo de bloqueo ya venció: se desbloquea el usuario
+                    await this.desbloquearUsuario(user.id_usuario, req);
+                }
             }
 
             const passwordMatch = await bcrypt.compare(contrasena, user.contrasena_hash);
@@ -294,7 +303,8 @@ class AuthController {
                 user: {
                     id: user.id_usuario,
                     nombre_usuario: user.nombre_usuario,
-                    correo_electronico: user.correo_electronico
+                    correo_electronico: user.correo_electronico,
+                    id_rol_usuario: user.id_rol_usuario
                 },
                 requiere_cambio_contrasena: user.id_estatus_usuario === ESTATUS_USUARIO.NUEVO,
                 tokens: {
@@ -302,7 +312,6 @@ class AuthController {
                     expires_in: process.env.JWT_ACCESS_EXPIRES_IN
                 }
             });
-
         } catch (err: any) {
             await logError(req, err, 'AuthController', 'login', 'usuario', 'lUsuario');
             res.status(500).json({ error: "Error en el servidor" });
