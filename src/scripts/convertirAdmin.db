@@ -1,0 +1,7 @@
+-- Para actualizar un usuario normal a administrador
+-- o a Supervisor se actualiza su rol y dependencia
+
+UPDATE usuario."tUsuario" SET 
+    id_rol_usuario = 1,
+    id_dependencia = NULL
+WHERE id_usuario = ;    -- Ingresar aquí el id a actualizar.
