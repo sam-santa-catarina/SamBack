@@ -7,6 +7,7 @@ import { logError } from "../utils/logError";
 import { logAudit } from "../utils/logAudit";
 import supabase from "../database";
 import bcrypt from "bcrypt";
+import { ID_ROL_ADMINISTRADOR, ID_ROL_CAPTURISTA } from "../constants/rolesUsuario";
 
 class AuthController {
 
@@ -15,6 +16,8 @@ class AuthController {
         this.login = this.login.bind(this);
         this.changePassword = this.changePassword.bind(this);
         this.logout = this.logout.bind(this);
+        this.resetUser = this.resetUser.bind(this);
+        this.listar = this.listar.bind(this);
     }
 
     /**
@@ -25,10 +28,7 @@ class AuthController {
         try {
             const user: RegisterUser = req.body;
 
-            const {
-                nombre_usuario,
-                correo_electronico
-            } = user;
+            const { nombre_usuario, correo_electronico, id_dependencia } = user;
 
             // Limpieza de variables
             const nombre = nombre_usuario?.trim().replace(/\s+/g, ' ');
@@ -76,14 +76,21 @@ class AuthController {
                 return res.status(500).json({ message: "Error interno al procesar la contraseña" });
             }
 
-            const defaultRole = Number(process.env.DEFAULT_ROLE_ID || 3); // Rol por defecto: Capturista
+            const defaultRole = Number(process.env.DEFAULT_ROLE_ID || ID_ROL_CAPTURISTA);
+            const esAdministrador = defaultRole === ID_ROL_ADMINISTRADOR;
+
+            // Un Administrador no lleva dependencia; cualquier otro rol la requiere.
+            if (!esAdministrador && !id_dependencia) {
+                return res.status(400).json({ errors: ["Debe especificar la dependencia del usuario"] });
+            }
 
             const { data, error } = await supabase.schema('usuario')
                 .rpc('registrar_usuario', {
                     _nombre_usuario: nombre,
                     _correo_electronico: correo,
                     _contrasena_hash: contrasena_hash,
-                    _id_rol_usuario: defaultRole
+                    _id_rol_usuario: defaultRole,
+                    _id_dependencia: esAdministrador ? null : id_dependencia
                 });
 
             if (error) {
@@ -92,13 +99,22 @@ class AuthController {
                 if (error.message?.includes('Ya existe un usuario registrado')) {
                     return res.status(409).json({ message: "El correo ya está registrado" });
                 }
+
+                if (error.message?.includes('dependencia')) {
+                    return res.status(400).json({ message: error.message });
+                }
                 return res.status(500).json({ message: "Error al registrar el usuario" });
             }
 
             const nuevoUsuario = data;
             const userId = nuevoUsuario.id;
 
-            await logAudit(req, 'REGISTER', 'tUsuario', userId, { email: correo, nombre: nombre, rol: defaultRole });
+            await logAudit(req, 'REGISTER', 'tUsuario', userId, {
+                email: correo,
+                nombre: nombre,
+                rol: defaultRole,
+                dependencia: esAdministrador ? null : id_dependencia
+            });
 
             res.status(201).json({
                 message: "Usuario registrado exitosamente",
@@ -322,6 +338,31 @@ class AuthController {
     }
 
     /**
+     * GET /api/usuarios
+     * Lista todos los usuarios del sistema (nombre y correo).
+     * Solo Administrador.
+     */
+    public async listar(req: Request, res: Response) {
+        try {
+            const { data, error } = await supabase
+                .schema('usuario')
+                .from('tUsuario')
+                .select('id_usuario, nombre_usuario, correo_electronico, id_estatus_usuario')
+                .order('nombre_usuario', { ascending: true });
+
+            if (error) {
+                await logError(req, error, 'AuthController', 'listar', 'usuario', 'lUsuario');
+                return res.status(500).json({ message: "Error al obtener los usuarios" });
+            }
+
+            res.status(200).json({ data });
+        } catch (err: any) {
+            await logError(req, err, 'AuthController', 'listar', 'usuario', 'lUsuario');
+            res.status(500).json({ error: "Error en el servidor" });
+        }
+    }
+
+    /**
      * POST /api/auth/refresh-token
      * Actualiza token para mantener sesión activa.
      */
@@ -518,11 +559,11 @@ class AuthController {
                 return res.status(400).json({ message: "La nueva contraseña debe ser diferente a la actual" });
             }
 
-            // Obtener hash actual del usuario
+            // Obtener datos actuales del usuario (hash + lo necesario para reemitir tokens)
             const { data: user, error: userError } = await supabase
                 .schema('usuario')
                 .from('tUsuario')
-                .select('contrasena_hash')
+                .select('id_usuario, nombre_usuario, correo_electronico, id_rol_usuario, contrasena_hash')
                 .eq('id_usuario', id_usuario)
                 .maybeSingle();
 
@@ -563,7 +604,7 @@ class AuthController {
                 return res.status(500).json({ message: "Error al actualizar la contraseña" });
             }
 
-            // Por seguridad, revocar todas las sesiones activas (fuerza a re-loguearse en otros dispositivos)
+            // Por seguridad, revocar TODAS las sesiones existentes (incluida la actual)...
             const ahora = new Date();
             const { error: revokeError } = await supabase
                 .schema('usuario')
@@ -576,11 +617,64 @@ class AuthController {
                 await logError(req, revokeError, 'AuthController', 'changePassword_revoke_sessions', 'usuario', 'lUsuario', id_usuario);
             }
 
+            // Emitimos una sesión nueva para este dispositivo
+            const tokenPayload: TokenPayload = {
+                id_usuario: user.id_usuario,
+                nombre_usuario: user.nombre_usuario,
+                correo_electronico: user.correo_electronico,
+                id_rol_usuario: user.id_rol_usuario
+            };
+
+            const newAccessToken = generateAccessToken(tokenPayload);
+            const newRefreshToken = generateRefreshToken(tokenPayload);
+            const newRefreshTokenHash = await hashRefreshToken(newRefreshToken);
+            const expiresAt = getRefreshTokenExpiry();
+
+            const rawIp = (req.headers['x-forwarded-for'] as string || req.ip || req.socket.remoteAddress) as string;
+            const realIp = rawIp?.split(',')[0]?.trim().replace(/^::ffff:/, '') || '0.0.0.0';
+            const userAgent = req.headers['user-agent'] || 'Desconocido';
+
+            const { error: insertError } = await supabase
+                .schema('usuario')
+                .from('tSesion')
+                .insert({
+                    id_usuario: user.id_usuario,
+                    refresh_token_hash: newRefreshTokenHash,
+                    ip_address: realIp,
+                    user_agent: userAgent,
+                    expires_at: expiresAt,
+                    revoked: false
+                });
+
+            if (insertError) {
+                await logError(req, insertError, 'AuthController', 'changePassword_insert_session', 'usuario', 'lUsuario', id_usuario);
+                return res.status(500).json({ message: "Error al crear nueva sesión" });
+            }
+
             await logAudit(req, 'CHANGE_PASSWORD', 'tUsuario', id_usuario, {});
 
-            res.clearCookie('refresh_token', { path: '/api/auth/refresh-token' });
+            res.cookie('refresh_token', newRefreshToken, {
+                httpOnly: true,
+                secure: process.env.NODE_ENV === 'production',
+                sameSite: 'strict',
+                path: '/api/auth/refresh-token',
+                maxAge: 30 * 24 * 60 * 60 * 1000
+            });
 
-            res.status(200).json({ message: "Contraseña actualizada exitosamente" });
+            res.status(200).json({
+                message: "Contraseña actualizada exitosamente",
+                user: {
+                    id: user.id_usuario,
+                    nombre_usuario: user.nombre_usuario,
+                    correo_electronico: user.correo_electronico,
+                    id_rol_usuario: user.id_rol_usuario
+                },
+                requiere_cambio_contrasena: false,
+                tokens: {
+                    access_token: newAccessToken,
+                    expires_in: process.env.JWT_ACCESS_EXPIRES_IN
+                }
+            });
 
         } catch (err: any) {
             await logError(req, err, 'AuthController', 'changePassword', 'usuario', 'lUsuario');
@@ -641,6 +735,117 @@ class AuthController {
     }
 
     /**
+     * POST /api/auth/reset-user
+     * Reinicia la cuenta de un usuario que perdió acceso:
+     * restablece la contraseña a la contraseña por defecto y
+     * el estatus a "Nuevo" (forzará cambio de contraseña en el próximo login).
+     * Solo Administrador puede llamar este endpoint.
+     * Conserva el resto de los datos del usuario intactos.
+     */
+    public async resetUser(req: Request, res: Response) {
+        try {
+            const { correo_electronico, id_usuario } = req.body;
+
+            if (!correo_electronico && !id_usuario) {
+                return res.status(400).json({ message: "Debe indicar correo_electronico o id_usuario" });
+            }
+
+            let query = supabase
+                .schema('usuario')
+                .from('tUsuario')
+                .select('id_usuario, correo_electronico, id_estatus_usuario');
+
+            if (id_usuario) {
+                query = query.eq('id_usuario', id_usuario);
+            } else {
+                const correoNormalizado = String(correo_electronico).toLowerCase().trim();
+                query = query.eq('correo_electronico', correoNormalizado);
+            }
+
+            const { data: usuario, error: userError } = await query.maybeSingle();
+
+            if (userError) {
+                await logError(req, userError, 'AuthController', 'resetUser', 'usuario', 'lUsuario');
+                return res.status(500).json({ message: "Error al buscar el usuario" });
+            }
+
+            if (!usuario) {
+                return res.status(404).json({ message: "Usuario no encontrado" });
+            }
+
+            if (usuario.id_estatus_usuario === ESTATUS_USUARIO.ELIMINADO) {
+                return res.status(403).json({ message: "No se puede reiniciar una cuenta eliminada" });
+            }
+
+            const DEFAULT_PASSWORD = process.env.DEFAULT_USER_PASSWORD || 'password';
+
+            let contrasena_hash: string;
+            try {
+                const saltRounds = process.env.NODE_ENV === 'production' ? 12 : 10;
+                contrasena_hash = await bcrypt.hash(DEFAULT_PASSWORD, saltRounds);
+            } catch (hashError) {
+                await logError(req, hashError, 'AuthController', 'resetUser', 'usuario', 'lUsuario', usuario.id_usuario);
+                return res.status(500).json({ message: "Error interno al procesar la contraseña" });
+            }
+
+            const { error: updateError } = await supabase
+                .schema('usuario')
+                .from('tUsuario')
+                .update({
+                    contrasena_hash,
+                    id_estatus_usuario: ESTATUS_USUARIO.NUEVO
+                })
+                .eq('id_usuario', usuario.id_usuario);
+
+            if (updateError) {
+                await logError(req, updateError, 'AuthController', 'resetUser', 'usuario', 'lUsuario', usuario.id_usuario);
+                return res.status(500).json({ message: "Error al reiniciar el usuario" });
+            }
+
+            const ahora = new Date();
+
+            const { error: accesoError } = await supabase
+                .schema('usuario')
+                .from('tAcceso')
+                .update({
+                    intentos_fallidos: 0,
+                    bloqueado_hasta: null,
+                    updated_at: ahora
+                })
+                .eq('id_usuario', usuario.id_usuario);
+
+            if (accesoError) {
+                await logError(req, accesoError, 'AuthController', 'resetUser_acceso', 'usuario', 'lUsuario', usuario.id_usuario);
+            }
+
+            const { error: revokeError } = await supabase
+                .schema('usuario')
+                .from('tSesion')
+                .update({ revoked: true, revoked_at: ahora })
+                .eq('id_usuario', usuario.id_usuario)
+                .eq('revoked', false);
+
+            if (revokeError) {
+                await logError(req, revokeError, 'AuthController', 'resetUser_sesiones', 'usuario', 'lUsuario', usuario.id_usuario);
+            }
+
+            const idAdministrador = (req as any).user?.id_usuario;
+            await logAudit(req, 'RESET_USER', 'tUsuario', usuario.id_usuario, {
+                realizado_por: idAdministrador,
+                correo: usuario.correo_electronico
+            });
+
+            res.status(200).json({
+                message: "Usuario reiniciado exitosamente. Deberá iniciar sesión con la contraseña por defecto y se le pedirá cambiarla."
+            });
+
+        } catch (err: any) {
+            await logError(req, err, 'AuthController', 'resetUser', 'usuario', 'lUsuario');
+            res.status(500).json({ error: "Error en el servidor" });
+        }
+    }
+
+    /**
      * Método auxiliar para registrar
      * intentos fallidos y posible bloqueo.
      */
@@ -676,6 +881,8 @@ class AuthController {
                 updated_at: new Date()
             })
             .eq('id_usuario', id_usuario);
+
+        await logAudit(req, 'LOGIN_FAILED', 'tUsuario', id_usuario, { intento_numero: nuevosIntentos });
 
         if (updateError) {
             await logError(req, updateError, 'AuthController', 'registrarIntentoFallido', 'usuario', 'lUsuario', id_usuario);
@@ -727,10 +934,15 @@ class AuthController {
             .eq('id_usuario', id_usuario)
             .eq('id_estatus_usuario', ESTATUS_USUARIO.BLOQUEADO);
 
+        if (!estatusError) {
+            await logAudit(req, 'ACCOUNT_UNLOCKED', 'tUsuario', id_usuario, {});
+        }
+
         if (estatusError) {
             await logError(req, estatusError, 'AuthController', 'desbloquearUsuario_estatus', 'usuario', 'lUsuario', id_usuario);
         }
     }
+
 }
 
 export const authController = new AuthController();

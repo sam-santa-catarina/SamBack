@@ -15,13 +15,21 @@ CREATE TABLE usuario."tEstatusUsuario" (
     descripcion VARCHAR(200) NULL
 );
 
+CREATE TABLE usuario."tDependencia" (
+    id_dependencia INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nombre_dependencia VARCHAR(60) NOT NULL UNIQUE,
+    descripcion_dependencia VARCHAR(200) NULL,
+    estatus_dependencia BOOLEAN DEFAULT TRUE
+);
+
 CREATE TABLE usuario."tUsuario" (
     id_usuario INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     nombre_usuario VARCHAR(60) NOT NULL,
     correo_electronico VARCHAR(150) UNIQUE NOT NULL,
     contrasena_hash TEXT NULL,
     id_rol_usuario INT REFERENCES usuario."tRolUsuario"(id_rol),
-    id_estatus_usuario INT NOT NULL DEFAULT 1 REFERENCES usuario."tEstatusUsuario"(id_estatus)
+    id_estatus_usuario INT NOT NULL DEFAULT 1 REFERENCES usuario."tEstatusUsuario"(id_estatus),
+    id_dependencia INT NULL REFERENCES usuario."tDependencia"(id_dependencia)
 );
 
 CREATE TABLE usuario."tAcceso" (
@@ -86,6 +94,13 @@ VALUES
 ('Bloqueado', 'El perfil está bloqueado, no se puede acceder'),
 ('Eliminado', 'El perfil ha sido eliminado (no puede acceder)');
 
+INSERT INTO usuario."tDependencia" (nombre_dependencia)
+VALUES
+('Desarrollo Social'),
+('Desarrollo Rural'),
+('Desarrollo Económico'),
+('Despacho');
+
 
 -- Ínidices
 
@@ -107,6 +122,9 @@ CREATE INDEX idx_sesion_expires ON usuario."tSesion" (expires_at);
 CREATE INDEX idx_sesion_token_hash ON usuario."tSesion" (refresh_token_hash);
 CREATE INDEX idx_sesion_revoked ON usuario."tSesion" (revoked) WHERE revoked = FALSE;
 
+-- tDependencia
+CREATE INDEX idx_dependencia_estatus ON usuario."tDependencia" (estatus_dependencia);
+
 
 -- Funciones
 
@@ -115,14 +133,14 @@ CREATE OR REPLACE FUNCTION usuario.registrar_usuario(
     _nombre_usuario     VARCHAR,
     _correo_electronico VARCHAR,
     _contrasena_hash    TEXT,
-    _id_rol_usuario     INT
+    _id_rol_usuario     INT,
+    _id_dependencia     INT DEFAULT NULL
 )
 RETURNS JSON AS $$
 DECLARE
     nuevo_id  INT;
     resultado JSON;
 BEGIN
-    -- Validaciones básicas
     IF _nombre_usuario IS NULL OR trim(_nombre_usuario) = '' THEN
         RAISE EXCEPTION 'El nombre de usuario es obligatorio';
     END IF;
@@ -150,11 +168,10 @@ BEGIN
         RAISE EXCEPTION 'Ya existe un usuario registrado con ese correo electrónico';
     END IF;
 
-    -- Insert
     INSERT INTO usuario."tUsuario" (
-        nombre_usuario, correo_electronico, contrasena_hash, id_rol_usuario
+        nombre_usuario, correo_electronico, contrasena_hash, id_rol_usuario, id_dependencia
     ) VALUES (
-        _nombre_usuario, lower(_correo_electronico), _contrasena_hash, _id_rol_usuario
+        _nombre_usuario, lower(_correo_electronico), _contrasena_hash, _id_rol_usuario, _id_dependencia
     )
     RETURNING id_usuario INTO nuevo_id;
 
@@ -163,7 +180,8 @@ BEGIN
     SELECT json_build_object(
         'id',                 nuevo_id,
         'nombre_usuario',     _nombre_usuario,
-        'correo_electronico', lower(_correo_electronico)
+        'correo_electronico', lower(_correo_electronico),
+        'id_dependencia',     _id_dependencia
     ) INTO resultado;
 
     RETURN resultado;
@@ -173,6 +191,43 @@ EXCEPTION
         RAISE EXCEPTION 'Ya existe un usuario registrado con ese correo electrónico';
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+
+-- Validar dependencia
+CREATE OR REPLACE FUNCTION usuario.validar_dependencia_usuario()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_nombre_rol VARCHAR;
+BEGIN
+    SELECT nombre_rol INTO v_nombre_rol
+    FROM usuario."tRolUsuario"
+    WHERE id_rol = NEW.id_rol_usuario;
+
+    IF v_nombre_rol = 'Administrador' THEN
+        IF NEW.id_dependencia IS NOT NULL THEN
+            RAISE EXCEPTION 'El rol Administrador no debe tener una dependencia asignada';
+        END IF;
+    ELSE
+        IF NEW.id_dependencia IS NULL THEN
+            RAISE EXCEPTION 'Los usuarios con rol % deben tener una dependencia asignada', v_nombre_rol;
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1 FROM usuario."tDependencia"
+            WHERE id_dependencia = NEW.id_dependencia AND estatus_dependencia = TRUE
+        ) THEN
+            RAISE EXCEPTION 'La dependencia especificada no existe o está inactiva';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_validar_dependencia_usuario
+BEFORE INSERT OR UPDATE OF id_rol_usuario, id_dependencia ON usuario."tUsuario"
+FOR EACH ROW
+EXECUTE FUNCTION usuario.validar_dependencia_usuario();
 
 
 -- Permisos de acceso
