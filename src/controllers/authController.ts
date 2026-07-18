@@ -158,7 +158,7 @@ class AuthController {
             const { data: user, error: userError } = await supabase
                 .schema('usuario')
                 .from('tUsuario')
-                .select('id_usuario, nombre_usuario, correo_electronico, contrasena_hash, id_rol_usuario, id_estatus_usuario')
+                .select('id_usuario, nombre_usuario, correo_electronico, contrasena_hash, id_rol_usuario, id_estatus_usuario, id_dependencia')
                 .eq('correo_electronico', correoNormalizado)
                 .maybeSingle();
 
@@ -236,7 +236,8 @@ class AuthController {
                 id_usuario: user.id_usuario,
                 nombre_usuario: user.nombre_usuario,
                 correo_electronico: user.correo_electronico,
-                id_rol_usuario: user.id_rol_usuario
+                id_rol_usuario: user.id_rol_usuario,
+                id_dependencia: user.id_dependencia ?? null
             };
 
             const accessToken = generateAccessToken(tokenPayload);
@@ -431,7 +432,7 @@ class AuthController {
             const { data: user, error: userError } = await supabase
                 .schema('usuario')
                 .from('tUsuario')
-                .select('id_usuario, nombre_usuario, correo_electronico, id_rol_usuario, id_estatus_usuario')
+                .select('id_usuario, nombre_usuario, correo_electronico, id_rol_usuario, id_estatus_usuario, id_dependencia')
                 .eq('id_usuario', userId)
                 .single();
 
@@ -463,7 +464,8 @@ class AuthController {
                 id_usuario: user.id_usuario,
                 nombre_usuario: user.nombre_usuario,
                 correo_electronico: user.correo_electronico,
-                id_rol_usuario: user.id_rol_usuario
+                id_rol_usuario: user.id_rol_usuario,
+                id_dependencia: user.id_dependencia ?? null
             };
 
             const newAccessToken = generateAccessToken(tokenPayload);
@@ -563,7 +565,7 @@ class AuthController {
             const { data: user, error: userError } = await supabase
                 .schema('usuario')
                 .from('tUsuario')
-                .select('id_usuario, nombre_usuario, correo_electronico, id_rol_usuario, contrasena_hash')
+                .select('id_usuario, nombre_usuario, correo_electronico, id_rol_usuario, contrasena_hash, id_dependencia')
                 .eq('id_usuario', id_usuario)
                 .maybeSingle();
 
@@ -622,7 +624,8 @@ class AuthController {
                 id_usuario: user.id_usuario,
                 nombre_usuario: user.nombre_usuario,
                 correo_electronico: user.correo_electronico,
-                id_rol_usuario: user.id_rol_usuario
+                id_rol_usuario: user.id_rol_usuario,
+                id_dependencia: user.id_dependencia ?? null
             };
 
             const newAccessToken = generateAccessToken(tokenPayload);
