@@ -1,0 +1,104 @@
+CREATE SCHEMA IF NOT EXISTS apoyo;
+
+CREATE TABLE apoyo."tPrograma" (
+    id_programa INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nombre_programa VARCHAR(150) NOT NULL,
+    id_dependencia INT NOT NULL REFERENCES usuario."tDependencia"(id_dependencia),
+    estatus_programa BOOLEAN DEFAULT TRUE,
+    UNIQUE (nombre_programa, id_dependencia)
+);
+
+CREATE TABLE apoyo."tApoyo" (
+    id_apoyo BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    -- Beneficiario
+    curp_beneficiario CHAR(18) NOT NULL,
+    nombres VARCHAR(100) NOT NULL,
+    apellido_paterno VARCHAR(60),
+    apellido_materno VARCHAR(60),
+
+    -- Domicilio
+    nombre_localidad VARCHAR(100) NULL,
+    calle VARCHAR(150) NULL,
+    numero_exterior VARCHAR(20) NULL,
+
+    -- Clasificación del apoyo
+    id_dependencia INT NOT NULL REFERENCES usuario."tDependencia"(id_dependencia),
+    id_programa INT NOT NULL REFERENCES apoyo."tPrograma"(id_programa),
+
+    -- Detalle del apoyo
+    nombre_concepto VARCHAR(150) NULL,
+    cantidad INT NULL DEFAULT 1 CHECK (cantidad > 0),
+    monto NUMERIC(12,2) CHECK (monto IS NULL OR monto >= 0),  -- nullable: apoyo en especie
+    fecha_apoyo DATE NULL,
+    otorgado BOOLEAN NOT NULL DEFAULT false,
+
+    -- Auditoría de captura
+    id_usuario_captura INT NOT NULL REFERENCES usuario."tUsuario"(id_usuario),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+    CONSTRAINT chk_curp_formato CHECK (
+        curp_beneficiario ~ '^[A-Z]{4}[0-9]{6}[HM][A-Z]{5}[A-Z0-9][0-9]$'
+    )
+);
+
+CREATE TABLE apoyo."lApoyo" (
+    id_log_apoyo INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    id_usuario INT NULL REFERENCES usuario."tUsuario"(id_usuario) ON DELETE SET NULL,
+    mensaje_error VARCHAR(500),
+    detalle_error TEXT,
+    clase VARCHAR(100),
+    metodo VARCHAR(100),
+    ip_address INET,
+    user_agent TEXT,
+    fecha_error_log TIMESTAMPTZ DEFAULT NOW()
+);
+
+
+-- Índices
+CREATE INDEX idx_apoyo_dependencia ON apoyo."tApoyo" (id_dependencia);
+CREATE INDEX idx_apoyo_programa ON apoyo."tApoyo" (id_programa);
+CREATE INDEX idx_apoyo_curp ON apoyo."tApoyo" (curp_beneficiario);
+CREATE INDEX idx_apoyo_curp_prefijo ON apoyo."tApoyo" (curp_beneficiario bpchar_pattern_ops);
+CREATE INDEX idx_apoyo_fecha ON apoyo."tApoyo" (fecha_apoyo);
+CREATE INDEX idx_apoyo_usuario_captura ON apoyo."tApoyo" (id_usuario_captura);
+
+CREATE INDEX idx_programa_dependencia ON apoyo."tPrograma" (id_dependencia);
+
+
+-- Trigger: id_dependencia de tApoyo debe coincidir con la
+-- dependencia del programa seleccionado.
+
+CREATE OR REPLACE FUNCTION apoyo.validar_dependencia_programa()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_dependencia_programa INT;
+BEGIN
+    SELECT id_dependencia INTO v_dependencia_programa
+    FROM apoyo."tPrograma"
+    WHERE id_programa = NEW.id_programa;
+
+    IF v_dependencia_programa IS NULL THEN
+        RAISE EXCEPTION 'El programa especificado no existe';
+    END IF;
+
+    IF v_dependencia_programa != NEW.id_dependencia THEN
+        RAISE EXCEPTION 'El programa seleccionado no pertenece a la dependencia indicada';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_validar_dependencia_programa
+BEFORE INSERT OR UPDATE OF id_programa, id_dependencia ON apoyo."tApoyo"
+FOR EACH ROW
+EXECUTE FUNCTION apoyo.validar_dependencia_programa();
+
+
+
+GRANT USAGE ON SCHEMA apoyo TO anon, authenticated, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA apoyo TO anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA apoyo
+GRANT ALL ON TABLES TO anon, authenticated, service_role;

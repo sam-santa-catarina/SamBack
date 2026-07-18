@@ -4,6 +4,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import AuthRoutes from "./routes/authRoutes";
 import AuditoriaRoutes from "./routes/auditoriaRoutes";
+import ApoyoRoutes from "./routes/apoyoRoutes";
 import { requireEstatusNormal } from "./middlewares/estatusMiddleware";
 import { authMiddleware } from "./middlewares/authMiddleware";
 
@@ -35,6 +36,7 @@ class Server {
         this.app.use("/api/auth", AuthRoutes);
         this.app.use("/api", authMiddleware, requireEstatusNormal)
         this.app.use("/api/auditoria", AuditoriaRoutes);
+        this.app.use("/api/apoyos", ApoyoRoutes);
     }
 
     start(): void {

@@ -82,8 +82,8 @@ VALUES
     'Revisa, valida y da seguimiento a los apoyos registrados, además de consultar reportes.'
 ),
 (
-    'Capturista',
-    'Registra y actualiza la información de los apoyos municipales asignados.'
+    'Dependencia',
+    'Visualiza la información de los apoyos municipales asignados.'
 );
 
 INSERT INTO usuario."tEstatusUsuario"
@@ -96,6 +96,7 @@ VALUES
 
 INSERT INTO usuario."tDependencia" (nombre_dependencia)
 VALUES
+('Secretaria')
 ('Desarrollo Social'),
 ('Desarrollo Rural'),
 ('Desarrollo Económico'),
@@ -206,6 +207,10 @@ BEGIN
     IF v_nombre_rol = 'Administrador' THEN
         IF NEW.id_dependencia IS NOT NULL THEN
             RAISE EXCEPTION 'El rol Administrador no debe tener una dependencia asignada';
+        END IF;
+    ELSIF v_nombre_rol = 'Supervisor' THEN
+        IF NEW.id_dependencia IS NOT NULL THEN
+            RAISE EXCEPTION 'El rol Supervisor no debe tener una dependencia asignada';
         END IF;
     ELSE
         IF NEW.id_dependencia IS NULL THEN
