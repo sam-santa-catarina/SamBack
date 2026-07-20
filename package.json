@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc",
+    "start": "node build/index.js",
     "dev": "nodemon build/index.js",
     "watch": "tsc -w",
     "prepare": "husky",
