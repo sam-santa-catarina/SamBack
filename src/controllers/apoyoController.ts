@@ -141,6 +141,7 @@ class ApoyoController {
                      id_usuario_captura, created_at`,
                     { count: 'exact' }
                 )
+                .eq('otorgado', true)
                 .order('created_at', { ascending: false })
                 .range(offset, offset + limit - 1);
 
