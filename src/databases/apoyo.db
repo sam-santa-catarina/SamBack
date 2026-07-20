@@ -96,6 +96,41 @@ BEFORE INSERT OR UPDATE OF id_programa, id_dependencia ON apoyo."tApoyo"
 FOR EACH ROW
 EXECUTE FUNCTION apoyo.validar_dependencia_programa();
 
+CREATE OR REPLACE FUNCTION apoyo.existe_apoyo_duplicado(
+    _curp CHAR(18),
+    _nombres VARCHAR(100),
+    _apellido_paterno VARCHAR(60),
+    _apellido_materno VARCHAR(60),
+    _nombre_localidad VARCHAR(100),
+    _calle VARCHAR(150),
+    _numero_exterior VARCHAR(20),
+    _id_dependencia INT,
+    _id_programa INT,
+    _nombre_concepto VARCHAR(150),
+    _cantidad INT,
+    _monto NUMERIC,
+    _fecha_apoyo DATE
+) RETURNS BOOLEAN AS $$
+BEGIN
+    RETURN EXISTS (
+        SELECT 1 FROM apoyo."tApoyo"
+        WHERE curp_beneficiario = _curp
+          AND nombres = _nombres
+          AND (apellido_paterno IS NOT DISTINCT FROM _apellido_paterno)
+          AND (apellido_materno IS NOT DISTINCT FROM _apellido_materno)
+          AND (nombre_localidad IS NOT DISTINCT FROM _nombre_localidad)
+          AND (calle IS NOT DISTINCT FROM _calle)
+          AND (numero_exterior IS NOT DISTINCT FROM _numero_exterior)
+          AND id_dependencia = _id_dependencia
+          AND id_programa = _id_programa
+          AND (nombre_concepto IS NOT DISTINCT FROM _nombre_concepto)
+          AND cantidad = _cantidad
+          AND (monto IS NOT DISTINCT FROM _monto)
+          AND (fecha_apoyo IS NOT DISTINCT FROM _fecha_apoyo)
+          AND otorgado = true
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
 
 GRANT USAGE ON SCHEMA apoyo TO anon, authenticated, service_role;

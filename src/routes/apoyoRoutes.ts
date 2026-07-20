@@ -14,8 +14,9 @@ class ApoyoRoutes {
 
     config(): void {
         this.router.get("/", apoyoController.listar);
-        this.router.post('/importar', requireAdmin, upload.single('file'), apoyoController.importarExcel
-);
+        this.router.get("/pendientes", apoyoController.listarPendientes);
+        this.router.post('/importar', requireAdmin, upload.single('file'), apoyoController.importarExcel);
+        this.router.post('/importar-pendientes', requireAdmin, upload.single('file'), apoyoController.importarExcelPendientes);
     }
 }
 
