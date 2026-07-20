@@ -7,6 +7,7 @@ import AuditoriaRoutes from "./routes/auditoriaRoutes";
 import ApoyoRoutes from "./routes/apoyoRoutes";
 import { requireEstatusNormal } from "./middlewares/estatusMiddleware";
 import { authMiddleware } from "./middlewares/authMiddleware";
+import DependenciaRoutes from "./routes/dependenciaRoutes";
 
 class Server {
     public app: Application;
@@ -37,6 +38,7 @@ class Server {
         this.app.use("/api", authMiddleware, requireEstatusNormal)
         this.app.use("/api/auditoria", AuditoriaRoutes);
         this.app.use("/api/apoyos", ApoyoRoutes);
+        this.app.use("/api/dependencias", DependenciaRoutes);
     }
 
     start(): void {
@@ -44,6 +46,7 @@ class Server {
             console.log('Server running on port', this.app.get('port'));
         });
     }
+    
 }
 
 const server = new Server();
