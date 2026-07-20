@@ -1,0 +1,242 @@
+-- Base de datos para SCSAM
+
+CREATE SCHEMA IF NOT EXISTS usuario;
+
+CREATE TABLE usuario."tRolUsuario" (
+    id_rol INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nombre_rol VARCHAR(40) NOT NULL,
+    descripcion_rol VARCHAR(200) NULL,
+    estatus_rol BOOLEAN DEFAULT TRUE
+);
+
+CREATE TABLE usuario."tEstatusUsuario" (
+    id_estatus INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    estado VARCHAR(40) NOT NULL,
+    descripcion VARCHAR(200) NULL
+);
+
+CREATE TABLE usuario."tDependencia" (
+    id_dependencia INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nombre_dependencia VARCHAR(60) NOT NULL UNIQUE,
+    descripcion_dependencia VARCHAR(200) NULL,
+    estatus_dependencia BOOLEAN DEFAULT TRUE
+);
+
+CREATE TABLE usuario."tUsuario" (
+    id_usuario INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    nombre_usuario VARCHAR(60) NOT NULL,
+    correo_electronico VARCHAR(150) UNIQUE NOT NULL,
+    contrasena_hash TEXT NULL,
+    id_rol_usuario INT REFERENCES usuario."tRolUsuario"(id_rol),
+    id_estatus_usuario INT NOT NULL DEFAULT 1 REFERENCES usuario."tEstatusUsuario"(id_estatus),
+    id_dependencia INT NULL REFERENCES usuario."tDependencia"(id_dependencia)
+);
+
+CREATE TABLE usuario."tAcceso" (
+    id_acceso INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    id_usuario INT UNIQUE NOT NULL REFERENCES usuario."tUsuario"(id_usuario) ON DELETE CASCADE,
+    ultimo_acceso TIMESTAMPTZ,
+    ultimo_intento_fallido TIMESTAMPTZ,
+    intentos_fallidos INT DEFAULT 0 CHECK (intentos_fallidos >= 0),
+    bloqueado_hasta TIMESTAMPTZ, -- NULL = no bloqueado, fecha futura = bloqueado hasta ese momento
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE usuario."lUsuario" (
+    id_log_acceso INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    id_usuario INT NULL REFERENCES usuario."tUsuario"(id_usuario) ON DELETE SET NULL,
+    mensaje_error VARCHAR(500),
+    detalle_error TEXT,
+    clase VARCHAR(100),
+    metodo VARCHAR(100),
+    ip_address INET,
+    user_agent TEXT,
+    fecha_error_log TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE usuario."tSesion" (
+    id_sesion UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id_usuario INT NOT NULL REFERENCES usuario."tUsuario"(id_usuario) ON DELETE CASCADE,
+    refresh_token_hash TEXT NOT NULL,
+    ip_address INET,
+    user_agent TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked BOOLEAN DEFAULT FALSE,
+    revoked_at TIMESTAMPTZ
+);
+
+
+-- Inserts iniciales
+
+INSERT INTO usuario."tRolUsuario"
+(nombre_rol, descripcion_rol)
+VALUES
+(
+    'Administrador',
+    'Administra el sistema, usuarios, catálogos, configuraciones y tiene acceso completo.'
+),
+(
+    'Supervisor',
+    'Revisa, valida y da seguimiento a los apoyos registrados, además de consultar reportes.'
+),
+(
+    'Dependencia',
+    'Visualiza la información de los apoyos municipales asignados.'
+);
+
+INSERT INTO usuario."tEstatusUsuario"
+(estado, descripcion)
+VALUES
+('Nuevo', 'El perfil acaba de ser creado'),
+('Normal', 'El perfil está operando de manera normal'),
+('Bloqueado', 'El perfil está bloqueado, no se puede acceder'),
+('Eliminado', 'El perfil ha sido eliminado (no puede acceder)');
+
+INSERT INTO usuario."tDependencia" (nombre_dependencia)
+VALUES
+('Secretaria')
+('Desarrollo Social'),
+('Desarrollo Rural'),
+('Desarrollo Económico'),
+('Despacho');
+
+
+-- Ínidices
+
+-- Estado
+CREATE INDEX idx_usuario_estatus ON usuario."tUsuario" (id_estatus_usuario);
+
+-- Acceso
+CREATE INDEX idx_acceso_id_usuario ON usuario."tAcceso" (id_usuario);
+CREATE INDEX idx_acceso_bloqueo ON usuario."tAcceso" (bloqueado_hasta) WHERE bloqueado_hasta IS NOT NULL;
+ 
+-- Log
+CREATE INDEX idx_log_fecha ON usuario."lUsuario" (fecha_error_log);
+CREATE INDEX idx_log_usuario ON usuario."lUsuario" (id_usuario);
+CREATE INDEX idx_log_ip ON usuario."lUsuario" (ip_address);
+ 
+-- Sesiones
+CREATE INDEX idx_sesion_usuario ON usuario."tSesion" (id_usuario);
+CREATE INDEX idx_sesion_expires ON usuario."tSesion" (expires_at);
+CREATE INDEX idx_sesion_token_hash ON usuario."tSesion" (refresh_token_hash);
+CREATE INDEX idx_sesion_revoked ON usuario."tSesion" (revoked) WHERE revoked = FALSE;
+
+-- tDependencia
+CREATE INDEX idx_dependencia_estatus ON usuario."tDependencia" (estatus_dependencia);
+
+
+-- Funciones
+
+-- Registrar usuario
+CREATE OR REPLACE FUNCTION usuario.registrar_usuario(
+    _nombre_usuario     VARCHAR,
+    _correo_electronico VARCHAR,
+    _contrasena_hash    TEXT,
+    _id_rol_usuario     INT,
+    _id_dependencia     INT DEFAULT NULL
+)
+RETURNS JSON AS $$
+DECLARE
+    nuevo_id  INT;
+    resultado JSON;
+BEGIN
+    IF _nombre_usuario IS NULL OR trim(_nombre_usuario) = '' THEN
+        RAISE EXCEPTION 'El nombre de usuario es obligatorio';
+    END IF;
+
+    IF _correo_electronico IS NULL
+       OR _correo_electronico !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' THEN
+        RAISE EXCEPTION 'Correo electrónico inválido';
+    END IF;
+
+    IF _contrasena_hash IS NULL OR trim(_contrasena_hash) = '' THEN
+        RAISE EXCEPTION 'La contraseña es obligatoria';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM usuario."tRolUsuario"
+        WHERE id_rol = _id_rol_usuario AND estatus_rol = TRUE
+    ) THEN
+        RAISE EXCEPTION 'El rol especificado no existe o está inactivo';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM usuario."tUsuario"
+        WHERE correo_electronico = lower(_correo_electronico)
+    ) THEN
+        RAISE EXCEPTION 'Ya existe un usuario registrado con ese correo electrónico';
+    END IF;
+
+    INSERT INTO usuario."tUsuario" (
+        nombre_usuario, correo_electronico, contrasena_hash, id_rol_usuario, id_dependencia
+    ) VALUES (
+        _nombre_usuario, lower(_correo_electronico), _contrasena_hash, _id_rol_usuario, _id_dependencia
+    )
+    RETURNING id_usuario INTO nuevo_id;
+
+    INSERT INTO usuario."tAcceso" (id_usuario) VALUES (nuevo_id);
+
+    SELECT json_build_object(
+        'id',                 nuevo_id,
+        'nombre_usuario',     _nombre_usuario,
+        'correo_electronico', lower(_correo_electronico),
+        'id_dependencia',     _id_dependencia
+    ) INTO resultado;
+
+    RETURN resultado;
+
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE EXCEPTION 'Ya existe un usuario registrado con ese correo electrónico';
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+
+-- Validar dependencia
+CREATE OR REPLACE FUNCTION usuario.validar_dependencia_usuario()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_nombre_rol VARCHAR;
+BEGIN
+    SELECT nombre_rol INTO v_nombre_rol
+    FROM usuario."tRolUsuario"
+    WHERE id_rol = NEW.id_rol_usuario;
+
+    IF v_nombre_rol = 'Administrador' THEN
+        IF NEW.id_dependencia IS NOT NULL THEN
+            RAISE EXCEPTION 'El rol Administrador no debe tener una dependencia asignada';
+        END IF;
+    ELSIF v_nombre_rol = 'Supervisor' THEN
+        IF NEW.id_dependencia IS NOT NULL THEN
+            RAISE EXCEPTION 'El rol Supervisor no debe tener una dependencia asignada';
+        END IF;
+    ELSE
+        IF NEW.id_dependencia IS NULL THEN
+            RAISE EXCEPTION 'Los usuarios con rol % deben tener una dependencia asignada', v_nombre_rol;
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1 FROM usuario."tDependencia"
+            WHERE id_dependencia = NEW.id_dependencia AND estatus_dependencia = TRUE
+        ) THEN
+            RAISE EXCEPTION 'La dependencia especificada no existe o está inactiva';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_validar_dependencia_usuario
+BEFORE INSERT OR UPDATE OF id_rol_usuario, id_dependencia ON usuario."tUsuario"
+FOR EACH ROW
+EXECUTE FUNCTION usuario.validar_dependencia_usuario();
+
+
+-- Permisos de acceso
+GRANT USAGE ON SCHEMA usuario TO anon, authenticated, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA usuario TO anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA usuario
+GRANT ALL ON TABLES TO anon, authenticated, service_role;
