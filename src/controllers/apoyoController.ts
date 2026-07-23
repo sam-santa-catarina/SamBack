@@ -89,6 +89,8 @@ class ApoyoController {
     constructor() {
         this.listar = this.listar.bind(this);
         this.listarPendientes = this.listarPendientes.bind(this);
+        this.listarSupervisor = this.listarSupervisor.bind(this);
+        this.listarPendientesSupervisor = this.listarPendientesSupervisor.bind(this);
         this.importarExcel = this.importarExcel.bind(this);
         this.importarExcelPendientes = this.importarExcelPendientes.bind(this);
     }
@@ -310,6 +312,213 @@ class ApoyoController {
 
         } catch (err: any) {
             await logError(req, err, 'ApoyoController', 'listarPendientes', 'apoyo', 'lApoyo');
+            res.status(500).json({ error: "Error en el servidor" });
+        }
+    }
+
+    /**
+     * GET /api/apoyos/supervisor/otorgados
+     * Igual que /api/apoyos pero exclusivo para Supervisor, y agrega
+     * filtro opcional por id_dependencia (además del filtro por CURP).
+     * El Supervisor siempre ve todas las dependencias, sin restricción,
+     * por eso este endpoint no aplica el filtro automático por
+     * dependencia del usuario que sí tiene el endpoint genérico.
+     */
+    public async listarSupervisor(req: Request, res: Response) {
+        try {
+            const offset = Math.max(0, Number(req.query.offset) || 0);
+            const limit = Math.min(MAX_LIMIT, Math.max(1, Number(req.query.limit) || DEFAULT_LIMIT));
+
+            const curpParam = typeof req.query.curp === 'string'
+                ? req.query.curp.trim().toUpperCase()
+                : null;
+
+            if (curpParam && curpParam.length > 0 && curpParam.length < CURP_MIN_CHARS_BUSQUEDA) {
+                return res.status(400).json({
+                    message: `Ingrese al menos ${CURP_MIN_CHARS_BUSQUEDA} caracteres de la CURP para buscar`
+                });
+            }
+
+            const idDependenciaParam = req.query.id_dependencia
+                ? Number(req.query.id_dependencia)
+                : null;
+
+            if (req.query.id_dependencia && (idDependenciaParam === null || isNaN(idDependenciaParam))) {
+                return res.status(400).json({ message: "id_dependencia debe ser un número válido" });
+            }
+
+            let query = supabase
+                .schema('apoyo')
+                .from('tApoyo')
+                .select(
+                    `id_apoyo, curp_beneficiario, nombres, apellido_paterno, apellido_materno,
+                     nombre_localidad, calle, numero_exterior,
+                     id_dependencia, id_programa, nombre_concepto,
+                     cantidad, monto, fecha_apoyo,
+                     id_usuario_captura, created_at`,
+                    { count: 'exact' }
+                )
+                .eq('otorgado', true)
+                .order('created_at', { ascending: false })
+                .range(offset, offset + limit - 1);
+
+            if (idDependenciaParam) {
+                query = query.eq('id_dependencia', idDependenciaParam);
+            }
+
+            if (curpParam) {
+                query = query.like('curp_beneficiario', `${curpParam}%`);
+            }
+
+            const { data: registros, error: apoyoError, count } = await query;
+
+            if (apoyoError) {
+                await logError(req, apoyoError, 'ApoyoController', 'listarSupervisor', 'apoyo', 'lApoyo');
+                return res.status(500).json({ message: "Error al consultar los apoyos" });
+            }
+
+            const idsProgramas = Array.from(new Set((registros ?? []).map((r) => r.id_programa)));
+            const idsDependencias = Array.from(new Set((registros ?? []).map((r) => r.id_dependencia)));
+            const idsUsuariosCaptura = Array.from(new Set((registros ?? []).map((r) => r.id_usuario_captura)));
+
+            const [programasRes, dependenciasRes, usuariosRes] = await Promise.all([
+                idsProgramas.length > 0
+                    ? supabase.schema('apoyo').from('tPrograma').select('id_programa, nombre_programa').in('id_programa', idsProgramas)
+                    : Promise.resolve({ data: [], error: null }),
+                idsDependencias.length > 0
+                    ? supabase.schema('usuario').from('tDependencia').select('id_dependencia, nombre_dependencia').in('id_dependencia', idsDependencias)
+                    : Promise.resolve({ data: [], error: null }),
+                idsUsuariosCaptura.length > 0
+                    ? supabase.schema('usuario').from('tUsuario').select('id_usuario, nombre_usuario').in('id_usuario', idsUsuariosCaptura)
+                    : Promise.resolve({ data: [], error: null }),
+            ]);
+
+            const programasPorId = new Map((programasRes.data ?? []).map((p: any) => [p.id_programa, p.nombre_programa]));
+            const dependenciasPorId = new Map((dependenciasRes.data ?? []).map((d: any) => [d.id_dependencia, d.nombre_dependencia]));
+            const usuariosPorId = new Map((usuariosRes.data ?? []).map((u: any) => [u.id_usuario, u.nombre_usuario]));
+
+            const data = (registros ?? []).map((r) => ({
+                id_apoyo: r.id_apoyo,
+                curp_beneficiario: r.curp_beneficiario,
+                nombre_completo: nombreCompleto(r.nombres, r.apellido_paterno, r.apellido_materno),
+                nombre_localidad: r.nombre_localidad,
+                calle: r.calle,
+                numero_exterior: r.numero_exterior,
+                dependencia: dependenciasPorId.get(r.id_dependencia) ?? null,
+                programa: programasPorId.get(r.id_programa) ?? null,
+                nombre_concepto: r.nombre_concepto,
+                cantidad: r.cantidad,
+                monto: r.monto,
+                fecha_apoyo: r.fecha_apoyo,
+                capturado_por: usuariosPorId.get(r.id_usuario_captura) ?? null,
+                created_at: r.created_at
+            }));
+
+            const total = count ?? 0;
+            const hasMore = offset + data.length < total;
+
+            res.status(200).json({ data, total, offset, limit, hasMore });
+
+        } catch (err: any) {
+            await logError(req, err, 'ApoyoController', 'listarSupervisor', 'apoyo', 'lApoyo');
+            res.status(500).json({ error: "Error en el servidor" });
+        }
+    }
+
+    /**
+     * GET /api/apoyos/supervisor/pendientes
+     * Igual que /api/apoyos/pendientes pero exclusivo para Supervisor,
+     * con el mismo filtro opcional por id_dependencia.
+     */
+    public async listarPendientesSupervisor(req: Request, res: Response) {
+        try {
+            const offset = Math.max(0, Number(req.query.offset) || 0);
+            const limit = Math.min(MAX_LIMIT, Math.max(1, Number(req.query.limit) || DEFAULT_LIMIT));
+
+            const curpParam = typeof req.query.curp === 'string'
+                ? req.query.curp.trim().toUpperCase()
+                : null;
+
+            if (curpParam && curpParam.length > 0 && curpParam.length < CURP_MIN_CHARS_BUSQUEDA) {
+                return res.status(400).json({
+                    message: `Ingrese al menos ${CURP_MIN_CHARS_BUSQUEDA} caracteres de la CURP para buscar`
+                });
+            }
+
+            const idDependenciaParam = req.query.id_dependencia
+                ? Number(req.query.id_dependencia)
+                : null;
+
+            if (req.query.id_dependencia && (idDependenciaParam === null || isNaN(idDependenciaParam))) {
+                return res.status(400).json({ message: "id_dependencia debe ser un número válido" });
+            }
+
+            let query = supabase
+                .schema('apoyo')
+                .from('tApoyo')
+                .select(
+                    `id_apoyo, curp_beneficiario, nombres, apellido_paterno, apellido_materno,
+                     id_dependencia, id_programa, nombre_concepto,
+                     id_usuario_captura, created_at`,
+                    { count: 'exact' }
+                )
+                .eq('otorgado', false)
+                .order('created_at', { ascending: false })
+                .range(offset, offset + limit - 1);
+
+            if (idDependenciaParam) {
+                query = query.eq('id_dependencia', idDependenciaParam);
+            }
+
+            if (curpParam) {
+                query = query.like('curp_beneficiario', `${curpParam}%`);
+            }
+
+            const { data: registros, error: apoyoError, count } = await query;
+
+            if (apoyoError) {
+                await logError(req, apoyoError, 'ApoyoController', 'listarPendientesSupervisor', 'apoyo', 'lApoyo');
+                return res.status(500).json({ message: "Error al consultar los apoyos pendientes" });
+            }
+
+            const idsProgramas = Array.from(new Set((registros ?? []).map((r) => r.id_programa)));
+            const idsDependencias = Array.from(new Set((registros ?? []).map((r) => r.id_dependencia)));
+            const idsUsuariosCaptura = Array.from(new Set((registros ?? []).map((r) => r.id_usuario_captura)));
+
+            const [programasRes, dependenciasRes, usuariosRes] = await Promise.all([
+                idsProgramas.length > 0
+                    ? supabase.schema('apoyo').from('tPrograma').select('id_programa, nombre_programa').in('id_programa', idsProgramas)
+                    : Promise.resolve({ data: [], error: null }),
+                idsDependencias.length > 0
+                    ? supabase.schema('usuario').from('tDependencia').select('id_dependencia, nombre_dependencia').in('id_dependencia', idsDependencias)
+                    : Promise.resolve({ data: [], error: null }),
+                idsUsuariosCaptura.length > 0
+                    ? supabase.schema('usuario').from('tUsuario').select('id_usuario, nombre_usuario').in('id_usuario', idsUsuariosCaptura)
+                    : Promise.resolve({ data: [], error: null }),
+            ]);
+
+            const programasPorId = new Map((programasRes.data ?? []).map((p: any) => [p.id_programa, p.nombre_programa]));
+            const dependenciasPorId = new Map((dependenciasRes.data ?? []).map((d: any) => [d.id_dependencia, d.nombre_dependencia]));
+            const usuariosPorId = new Map((usuariosRes.data ?? []).map((u: any) => [u.id_usuario, u.nombre_usuario]));
+
+            const data = (registros ?? []).map((r) => ({
+                id_apoyo: r.id_apoyo,
+                curp_beneficiario: r.curp_beneficiario,
+                nombre_completo: nombreCompleto(r.nombres, r.apellido_paterno, r.apellido_materno),
+                dependencia: dependenciasPorId.get(r.id_dependencia) ?? null,
+                programa: programasPorId.get(r.id_programa) ?? null,
+                nombre_concepto: r.nombre_concepto,
+                capturado_por: usuariosPorId.get(r.id_usuario_captura) ?? null,
+                created_at: r.created_at
+            }));
+
+            const total = count ?? 0;
+            const hasMore = offset + data.length < total;
+
+            res.status(200).json({ data, total, offset, limit, hasMore });
+
+        } catch (err: any) {
+            await logError(req, err, 'ApoyoController', 'listarPendientesSupervisor', 'apoyo', 'lApoyo');
             res.status(500).json({ error: "Error en el servidor" });
         }
     }
