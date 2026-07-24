@@ -1,0 +1,48 @@
+-- ============================================
+-- 1. Activar RLS en TODAS las tablas existentes
+-- ============================================
+
+-- Schema usuario
+ALTER TABLE usuario."tRolUsuario" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usuario."tEstatusUsuario" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usuario."tDependencia" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usuario."tUsuario" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usuario."tAcceso" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usuario."lUsuario" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usuario."tSesion" ENABLE ROW LEVEL SECURITY;
+
+-- Schema apoyo
+ALTER TABLE apoyo."tPrograma" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE apoyo."tApoyo" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE apoyo."lApoyo" ENABLE ROW LEVEL SECURITY;
+
+-- Schema sistema
+ALTER TABLE sistema."lSistema" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sistema."tAuditoria" ENABLE ROW LEVEL SECURITY;
+
+-- No creamos NINGUNA política. Sin políticas, con RLS activado,
+-- la regla por defecto es "negar todo" para anon/authenticated.
+-- service_role sigue funcionando normal porque bypassa RLS siempre.
+
+
+-- ============================================
+-- 2. Revocar permisos de anon y authenticated
+--    (dejamos únicamente service_role)
+-- ============================================
+
+-- Schema usuario
+REVOKE ALL ON ALL TABLES IN SCHEMA usuario FROM anon, authenticated;
+REVOKE USAGE ON SCHEMA usuario FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA usuario REVOKE ALL ON TABLES FROM anon, authenticated;
+
+-- Schema apoyo
+REVOKE ALL ON ALL TABLES IN SCHEMA apoyo FROM anon, authenticated;
+REVOKE USAGE ON SCHEMA apoyo FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA apoyo REVOKE ALL ON TABLES FROM anon, authenticated;
+
+-- Schema sistema
+REVOKE ALL ON ALL TABLES IN SCHEMA sistema FROM anon, authenticated;
+REVOKE USAGE ON SCHEMA sistema FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES IN SCHEMA sistema REVOKE ALL ON TABLES FROM anon, authenticated;
+
+-- Nota: NO tocamos los permisos de service_role, siguen intactos.

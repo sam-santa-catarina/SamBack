@@ -3,8 +3,9 @@ import "multer";
 import supabase from "../database";
 import { logError } from "../utils/logError";
 import { logAudit } from "../utils/logAudit";
-import { ID_ROL_ADMINISTRADOR, ID_ROL_SUPERVISOR } from "../constants/rolesUsuario";
+import { ID_ROL_ADMINISTRADOR, ID_ROL_SUPERVISOR, ID_ROL_CAPTURISTA } from "../constants/rolesUsuario";
 import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 
 const DEFAULT_LIMIT = 30;
 const MAX_LIMIT = 100;
@@ -42,6 +43,14 @@ function excelSerialToDateString(serial: number): string | null {
     const m = (date.getMonth() + 1).toString().padStart(2, '0');
     const a = date.getFullYear();
     return `${d}/${m}/${a}`;
+}
+
+function formatFechaISOaDDMMYYYY(fechaIso: string | null): string {
+    if (!fechaIso) return '';
+    const partes = fechaIso.split('-');
+    if (partes.length !== 3) return '';
+    const [anio, mes, dia] = partes;
+    return `${dia}/${mes}/${anio}`;
 }
 
 function validarFechaDDMMYYYY(fecha: string | undefined): string | null {
@@ -93,6 +102,8 @@ class ApoyoController {
         this.listarPendientesSupervisor = this.listarPendientesSupervisor.bind(this);
         this.importarExcel = this.importarExcel.bind(this);
         this.importarExcelPendientes = this.importarExcelPendientes.bind(this);
+        this.exportarSinMonto = this.exportarSinMonto.bind(this);
+        this.actualizarMontoExcel = this.actualizarMontoExcel.bind(this);
     }
 
     /**
@@ -251,7 +262,7 @@ class ApoyoController {
                 .from('tApoyo')
                 .select(
                     `id_apoyo, curp_beneficiario, nombres, apellido_paterno, apellido_materno,
-                     id_dependencia, id_programa, nombre_concepto,
+                     id_dependencia, id_programa, nombre_concepto, estatus,
                      id_usuario_captura, created_at`,
                     { count: 'exact' }
                 )
@@ -301,6 +312,7 @@ class ApoyoController {
                 dependencia: dependenciasPorId.get(r.id_dependencia) ?? null,
                 programa: programasPorId.get(r.id_programa) ?? null,
                 nombre_concepto: r.nombre_concepto,
+                estatus: r.estatus,
                 capturado_por: usuariosPorId.get(r.id_usuario_captura) ?? null,
                 created_at: r.created_at
             }));
@@ -319,7 +331,8 @@ class ApoyoController {
     /**
      * GET /api/apoyos/supervisor/otorgados
      * Igual que /api/apoyos pero exclusivo para Supervisor, y agrega
-     * filtro opcional por id_dependencia (además del filtro por CURP).
+     * filtro opcional por id_dependencia, calle y número exterior
+     * (además del filtro por CURP).
      * El Supervisor siempre ve todas las dependencias, sin restricción,
      * por eso este endpoint no aplica el filtro automático por
      * dependencia del usuario que sí tiene el endpoint genérico.
@@ -338,6 +351,14 @@ class ApoyoController {
                     message: `Ingrese al menos ${CURP_MIN_CHARS_BUSQUEDA} caracteres de la CURP para buscar`
                 });
             }
+
+            const calleParam = typeof req.query.calle === 'string'
+                ? limpiarTextoLibre(req.query.calle)
+                : null;
+
+            const numeroExteriorParam = typeof req.query.numero_exterior === 'string'
+                ? limpiarTextoLibre(req.query.numero_exterior)
+                : null;
 
             const idDependenciaParam = req.query.id_dependencia
                 ? Number(req.query.id_dependencia)
@@ -368,6 +389,14 @@ class ApoyoController {
 
             if (curpParam) {
                 query = query.like('curp_beneficiario', `${curpParam}%`);
+            }
+
+            if (calleParam) {
+                query = query.ilike('calle', `%${calleParam}%`);
+            }
+
+            if (numeroExteriorParam) {
+                query = query.eq('numero_exterior', numeroExteriorParam);
             }
 
             const { data: registros, error: apoyoError, count } = await query;
@@ -458,7 +487,7 @@ class ApoyoController {
                 .from('tApoyo')
                 .select(
                     `id_apoyo, curp_beneficiario, nombres, apellido_paterno, apellido_materno,
-                     id_dependencia, id_programa, nombre_concepto,
+                     id_dependencia, id_programa, nombre_concepto, estatus,
                      id_usuario_captura, created_at`,
                     { count: 'exact' }
                 )
@@ -508,6 +537,7 @@ class ApoyoController {
                 dependencia: dependenciasPorId.get(r.id_dependencia) ?? null,
                 programa: programasPorId.get(r.id_programa) ?? null,
                 nombre_concepto: r.nombre_concepto,
+                estatus: r.estatus,
                 capturado_por: usuariosPorId.get(r.id_usuario_captura) ?? null,
                 created_at: r.created_at
             }));
@@ -531,8 +561,17 @@ class ApoyoController {
     public async importarExcel(req: Request, res: Response) {
         try {
             const usuarioActual = (req as any).user;
-            if (usuarioActual?.id_rol_usuario !== ID_ROL_ADMINISTRADOR) {
-                return res.status(403).json({ message: "Solo el Administrador puede importar apoyos" });
+            const idRol: number = usuarioActual?.id_rol_usuario;
+
+            if (idRol !== ID_ROL_ADMINISTRADOR && idRol !== ID_ROL_CAPTURISTA) {
+                return res.status(403).json({ message: "No tiene permisos para importar apoyos" });
+            }
+
+            const esCapturista = idRol === ID_ROL_CAPTURISTA;
+            const idDependenciaUsuario: number | null = usuarioActual?.id_dependencia ?? null;
+
+            if (esCapturista && !idDependenciaUsuario) {
+                return res.status(403).json({ message: "No tiene una dependencia asignada" });
             }
 
             const file = (req as any).file as Express.Multer.File | undefined;
@@ -748,6 +787,8 @@ class ApoyoController {
                 const depId = dependenciaMap.get(depNombre);
                 if (!depId) {
                     observaciones.push(`Dependencia "${depNombre}" no encontrada (verifique el nombre exacto)`);
+                } else if (esCapturista && depId !== idDependenciaUsuario) {
+                    observaciones.push('Solo puede capturar apoyos para su propia dependencia');
                 } else {
                     registro.id_dependencia = depId;
                     if (!nombreDependenciaDetectado) {
@@ -834,6 +875,7 @@ class ApoyoController {
                             monto: registro.monto,
                             fecha_apoyo: registro.fecha_apoyo,
                             otorgado: true,
+                            estatus: 'Entregado',
                             updated_at: new Date().toISOString(),
                             id_usuario_captura: usuarioActual.id_usuario
                         };
@@ -861,6 +903,7 @@ class ApoyoController {
                             ignorados++;
                         } else {
                             registro.otorgado = true;
+                            registro.estatus = null;
                             registrosAInsertar.push(registro);
                             otorgadosExistentes.add(keyDuplicado);
                         }
@@ -1025,8 +1068,17 @@ class ApoyoController {
     public async importarExcelPendientes(req: Request, res: Response) {
         try {
             const usuarioActual = (req as any).user;
-            if (usuarioActual?.id_rol_usuario !== ID_ROL_ADMINISTRADOR) {
-                return res.status(403).json({ message: "Solo el Administrador puede importar apoyos pendientes" });
+            const idRol: number = usuarioActual?.id_rol_usuario;
+
+            if (idRol !== ID_ROL_ADMINISTRADOR && idRol !== ID_ROL_CAPTURISTA) {
+                return res.status(403).json({ message: "No tiene permisos para importar apoyos pendientes" });
+            }
+
+            const esCapturista = idRol === ID_ROL_CAPTURISTA;
+            const idDependenciaUsuario: number | null = usuarioActual?.id_dependencia ?? null;
+
+            if (esCapturista && !idDependenciaUsuario) {
+                return res.status(403).json({ message: "No tiene una dependencia asignada" });
             }
 
             const file = (req as any).file as Express.Multer.File | undefined;
@@ -1110,7 +1162,6 @@ class ApoyoController {
                 }
             });
 
-            // --- NUEVO: precarga acotada de apoyos existentes por CURP ---
             const curpsUnicos = Array.from(new Set(
                 filas
                     .map(f => (f['CURP'] ?? '').trim().toUpperCase())
@@ -1151,7 +1202,6 @@ class ApoyoController {
                     otorgadosExistentes.add(key);
                 }
             });
-            // --- fin precarga ---
 
             let nombreDependenciaDetectado: string | null = null;
 
@@ -1201,6 +1251,8 @@ class ApoyoController {
                 const depId = dependenciaMap.get(depNombre);
                 if (!depId) {
                     observaciones.push(`Dependencia "${depNombre}" no encontrada (verifique el nombre exacto)`);
+                } else if (esCapturista && depId !== idDependenciaUsuario) {
+                    observaciones.push('Solo puede capturar apoyos para su propia dependencia');
                 } else {
                     registro.id_dependencia = depId;
                     if (!nombreDependenciaDetectado) {
@@ -1230,6 +1282,8 @@ class ApoyoController {
                 } else {
                     registro.nombre_concepto = concepto;
                 }
+
+                registro.estatus = limpiarTextoLibre(fila['ESTATUS'] ?? '');
 
                 registro.id_usuario_captura = usuarioActual.id_usuario;
                 registro.otorgado = false;
@@ -1362,6 +1416,391 @@ class ApoyoController {
 
         } catch (err: any) {
             await logError(req, err, 'ApoyoController', 'importarExcelPendientes', 'apoyo', 'lApoyo');
+            res.status(500).json({ error: "Error en el servidor al procesar el archivo" });
+        }
+    }
+
+    /**
+     * GET /api/apoyos/exportar-sin-monto
+     * Genera un Excel descargable con todos los apoyos OTORGADOS que no
+     * tienen monto registrado (monto IS NULL), para que el usuario los
+     * llene y los vuelva a subir con /api/apoyos/actualizar-monto.
+     *
+     * - Administrador: requiere el query param id_dependencia (no tiene
+     *   dependencia propia, debe indicar para cuál generar el reporte).
+     * - Capturista/Dependencia: siempre genera el Excel de su propia
+     *   dependencia, sin importar qué mande en el query.
+     *
+     * La columna ID_APOYO es la que usa /actualizar-monto para identificar el
+     * registro exacto (no se basa en CURP/nombre, evita ambigüedad). Esa
+     * columna se bloquea en el propio Excel (hoja protegida, solo esa
+     * columna con locked=true) para que el usuario no la manipule por
+     * error; aun si lo hiciera, el backend valida el ID contra la base de
+     * datos antes de aplicar cualquier actualización.
+     */
+    public async exportarSinMonto(req: Request, res: Response) {
+        try {
+            const usuarioActual = (req as any).user;
+            const idRol: number = usuarioActual?.id_rol_usuario;
+
+            if (idRol !== ID_ROL_ADMINISTRADOR && idRol !== ID_ROL_CAPTURISTA) {
+                return res.status(403).json({ message: "No tiene permisos para exportar este reporte" });
+            }
+
+            const esCapturista = idRol === ID_ROL_CAPTURISTA;
+            let idDependencia: number | null = null;
+
+            if (esCapturista) {
+                idDependencia = usuarioActual?.id_dependencia ?? null;
+                if (!idDependencia) {
+                    return res.status(403).json({ message: "No tiene una dependencia asignada" });
+                }
+            } else {
+                idDependencia = req.query.id_dependencia ? Number(req.query.id_dependencia) : null;
+                if (!idDependencia || isNaN(idDependencia)) {
+                    return res.status(400).json({ message: "Debe indicar id_dependencia" });
+                }
+            }
+
+            const { data: dependenciaData, error: dependenciaError } = await supabase
+                .schema('usuario')
+                .from('tDependencia')
+                .select('nombre_dependencia')
+                .eq('id_dependencia', idDependencia)
+                .maybeSingle();
+
+            if (dependenciaError) {
+                await logError(req, dependenciaError, 'ApoyoController', 'exportarSinMonto', 'apoyo', 'lApoyo');
+                return res.status(500).json({ message: "Error al consultar la dependencia" });
+            }
+
+            if (!dependenciaData) {
+                return res.status(404).json({ message: "La dependencia especificada no existe" });
+            }
+
+            const { data: registros, error: apoyoError } = await supabase
+                .schema('apoyo')
+                .from('tApoyo')
+                .select(`id_apoyo, curp_beneficiario, nombres, apellido_paterno, apellido_materno,
+                         id_programa, nombre_concepto, fecha_apoyo`)
+                .eq('id_dependencia', idDependencia)
+                .eq('otorgado', true)
+                .is('monto', null)
+                .order('created_at', { ascending: true });
+
+            if (apoyoError) {
+                await logError(req, apoyoError, 'ApoyoController', 'exportarSinMonto', 'apoyo', 'lApoyo');
+                return res.status(500).json({ message: "Error al consultar los apoyos" });
+            }
+
+            const idsProgramas = Array.from(new Set((registros ?? []).map((r) => r.id_programa)));
+            const { data: programas } = idsProgramas.length > 0
+                ? await supabase.schema('apoyo').from('tPrograma').select('id_programa, nombre_programa').in('id_programa', idsProgramas)
+                : { data: [] };
+            const programasPorId = new Map((programas ?? []).map((p: any) => [p.id_programa, p.nombre_programa]));
+
+            const COLUMNAS: { header: string; width: number }[] = [
+                { header: 'ID_APOYO', width: 12 },
+                { header: 'CURP', width: 20 },
+                { header: 'NOMBRE(S)', width: 25 },
+                { header: 'APELLIDO PATERNO', width: 20 },
+                { header: 'APELLIDO MATERNO', width: 20 },
+                { header: 'PROGRAMA', width: 30 },
+                { header: 'CONCEPTO DE APOYO', width: 30 },
+                { header: 'FECHA DE APOYO', width: 15 },
+                { header: 'MONTO', width: 15 }
+            ];
+            const headers = COLUMNAS.map((c) => c.header);
+            const COLUMNA_ID_APOYO = 1; // ExcelJS usa columnas base 1
+
+            const workbook = new ExcelJS.Workbook();
+            const ws = workbook.addWorksheet('Sin monto');
+
+            ws.columns = COLUMNAS.map((c) => ({ width: c.width }));
+
+            // Preámbulo (3 filas), igual que el resto de plantillas del sistema
+            ws.addRow([`Apoyos sin monto registrado - ${dependenciaData.nombre_dependencia}`]);
+            ws.addRow([`Generado: ${new Date().toLocaleDateString('es-MX')}`]);
+            ws.addRow([]);
+
+            // Encabezados
+            const headerRow = ws.addRow(headers);
+            headerRow.font = { bold: true };
+
+            // Datos
+            (registros ?? []).forEach((r) => {
+                ws.addRow([
+                    r.id_apoyo,
+                    r.curp_beneficiario,
+                    r.nombres,
+                    r.apellido_paterno ?? '',
+                    r.apellido_materno ?? '',
+                    programasPorId.get(r.id_programa) ?? '',
+                    r.nombre_concepto ?? '',
+                    formatFechaISOaDDMMYYYY(r.fecha_apoyo),
+                    null // MONTO vacío para que lo llenen
+                ]);
+            });
+
+            const HEADER_ROW_NUMBER = headerRow.number;
+            for (let rowNumber = HEADER_ROW_NUMBER; rowNumber <= ws.rowCount; rowNumber++) {
+                const row = ws.getRow(rowNumber);
+                for (let col = 1; col <= headers.length; col++) {
+                    const cell = row.getCell(col);
+                    cell.protection = { locked: col === COLUMNA_ID_APOYO };
+                }
+            }
+
+            ws.protect('', {
+                selectLockedCells: true,
+                selectUnlockedCells: true,
+                formatCells: false,
+                formatColumns: false,
+                formatRows: false,
+                insertColumns: false,
+                insertRows: false,
+                insertHyperlinks: false,
+                deleteColumns: false,
+                deleteRows: false,
+                sort: false,
+                autoFilter: false,
+                pivotTables: false
+            });
+
+            const excelBuffer = await workbook.xlsx.writeBuffer();
+
+            const slug = slugify(dependenciaData.nombre_dependencia);
+            const nombreArchivo = `apoyos-sin-monto-${slug}.xlsx`;
+
+            res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            res.setHeader('Content-Disposition', `attachment; filename=${nombreArchivo}`);
+            res.status(200).send(Buffer.from(excelBuffer));
+
+        } catch (err: any) {
+            await logError(req, err, 'ApoyoController', 'exportarSinMonto', 'apoyo', 'lApoyo');
+            res.status(500).json({ error: "Error en el servidor al generar el reporte" });
+        }
+    }
+
+    /**
+     * POST /api/apoyos/actualizar-monto
+     * Sube el Excel generado por /exportar-sin-monto (con la columna
+     * ID_APOYO ya llena) y actualiza ÚNICAMENTE el campo monto de cada
+     * registro indicado. No inserta registros nuevos ni toca ningún otro
+     * campo — el sistema identifica el apoyo exacto por su ID_APOYO, no
+     * por CURP/nombre, para evitar ambigüedad.
+     *
+     * - Administrador: puede actualizar apoyos de cualquier dependencia.
+     * - Capturista/Dependencia: solo puede actualizar apoyos que
+     *   pertenezcan a su propia dependencia; cualquier fila que apunte a
+     *   un apoyo de otra dependencia se marca como error, no se aplica.
+     */
+    public async actualizarMontoExcel(req: Request, res: Response) {
+        try {
+            const usuarioActual = (req as any).user;
+            const idRol: number = usuarioActual?.id_rol_usuario;
+
+            if (idRol !== ID_ROL_ADMINISTRADOR && idRol !== ID_ROL_CAPTURISTA) {
+                return res.status(403).json({ message: "No tiene permisos para actualizar montos" });
+            }
+
+            const esCapturista = idRol === ID_ROL_CAPTURISTA;
+            const idDependenciaUsuario: number | null = usuarioActual?.id_dependencia ?? null;
+
+            if (esCapturista && !idDependenciaUsuario) {
+                return res.status(403).json({ message: "No tiene una dependencia asignada" });
+            }
+
+            const file = (req as any).file as Express.Multer.File | undefined;
+            if (!file) {
+                return res.status(400).json({ message: "Debe subir un archivo Excel (.xlsx)" });
+            }
+
+            const workbook = XLSX.read(file.buffer, { type: 'buffer' });
+            const sheetName = workbook.SheetNames[0];
+            if (!sheetName) {
+                return res.status(400).json({ message: "El archivo Excel no contiene hojas" });
+            }
+            const worksheet = workbook.Sheets[sheetName];
+            if (!worksheet) {
+                return res.status(400).json({ message: "La hoja de Excel no existe o no se pudo leer" });
+            }
+
+            const rawRows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+
+            const HEADER_ROW_INDEX = 3;
+            if (rawRows.length <= HEADER_ROW_INDEX) {
+                return res.status(400).json({ message: "El archivo Excel no tiene suficientes filas (se espera encabezados en la fila 4)" });
+            }
+
+            const headers = rawRows[HEADER_ROW_INDEX] as string[];
+            if (!headers || headers.every(h => !h)) {
+                return res.status(400).json({ message: "No se encontraron encabezados en la fila 4" });
+            }
+
+            const headersNormalizados = headers.map(h => String(h).trim().toUpperCase());
+            if (!headersNormalizados.includes('ID_APOYO') || !headersNormalizados.includes('MONTO')) {
+                return res.status(400).json({
+                    message: "El archivo no tiene el formato esperado (faltan columnas ID_APOYO y/o MONTO). Use el Excel generado por el reporte de apoyos sin monto."
+                });
+            }
+
+            const filas: Record<string, string>[] = [];
+            for (let i = HEADER_ROW_INDEX + 1; i < rawRows.length; i++) {
+                const row = rawRows[i];
+                if (!row || row.every(cell => cell === undefined || cell === '' || cell === null)) continue;
+
+                const obj: Record<string, string> = {};
+                headersNormalizados.forEach((header, idx) => {
+                    obj[header] = String(row[idx] ?? '');
+                });
+                (obj as any).__rowIndex = i;
+                filas.push(obj);
+            }
+
+            if (filas.length === 0) {
+                return res.status(400).json({ message: "El archivo Excel está vacío" });
+            }
+
+            // Precargar los apoyos referenciados para validar existencia y
+            // pertenencia en memoria, sin una query por fila
+            const idsApoyoUnicos = Array.from(new Set(
+                filas
+                    .map(f => parseInt((f['ID_APOYO'] ?? '').toString().trim(), 10))
+                    .filter(id => !isNaN(id))
+            ));
+
+            const { data: apoyosExistentes, error: apoyosError } = idsApoyoUnicos.length > 0
+                ? await supabase
+                    .schema('apoyo')
+                    .from('tApoyo')
+                    .select('id_apoyo, id_dependencia, otorgado')
+                    .in('id_apoyo', idsApoyoUnicos)
+                : { data: [], error: null };
+
+            if (apoyosError) {
+                await logError(req, apoyosError, 'ApoyoController', 'actualizarMontoExcel', 'apoyo', 'lApoyo');
+                return res.status(500).json({ message: "Error al consultar los apoyos existentes" });
+            }
+
+            const apoyosPorId = new Map((apoyosExistentes ?? []).map((a: any) => [a.id_apoyo, a]));
+
+            const errorRows: { rowIndex: number; observaciones: string }[] = [];
+            const updatesAAplicar: { id_apoyo: number; monto: number }[] = [];
+
+            for (const fila of filas) {
+                const observaciones: string[] = [];
+
+                const idApoyoRaw = (fila['ID_APOYO'] ?? '').toString().trim();
+                const idApoyo = parseInt(idApoyoRaw, 10);
+
+                if (idApoyoRaw === '' || isNaN(idApoyo)) {
+                    observaciones.push('ID_APOYO inválido o vacío');
+                } else {
+                    const apoyoExistente = apoyosPorId.get(idApoyo);
+
+                    if (!apoyoExistente) {
+                        observaciones.push(`No existe ningún apoyo con ID_APOYO ${idApoyo}`);
+                    } else if (!apoyoExistente.otorgado) {
+                        observaciones.push('El apoyo indicado está pendiente, no otorgado; no aplica actualización de monto');
+                    } else if (esCapturista && apoyoExistente.id_dependencia !== idDependenciaUsuario) {
+                        observaciones.push('El apoyo indicado no pertenece a su dependencia');
+                    } else {
+                        const montoRaw = (fila['MONTO'] ?? '').toString().trim();
+                        if (montoRaw === '') {
+                            observaciones.push('MONTO es obligatorio');
+                        } else {
+                            const monto = parseFloat(montoRaw);
+                            if (isNaN(monto) || monto < 0) {
+                                observaciones.push('MONTO debe ser un número positivo (puede tener decimales)');
+                            } else {
+                                updatesAAplicar.push({ id_apoyo: idApoyo, monto });
+                            }
+                        }
+                    }
+                }
+
+                if (observaciones.length > 0) {
+                    errorRows.push({
+                        rowIndex: Number((fila as any).__rowIndex),
+                        observaciones: observaciones.join('; ')
+                    });
+                }
+            }
+
+            let actualizados = 0;
+
+            if (updatesAAplicar.length > 0) {
+                const resultados = await Promise.all(
+                    updatesAAplicar.map(u =>
+                        supabase
+                            .schema('apoyo')
+                            .from('tApoyo')
+                            .update({ monto: u.monto, updated_at: new Date().toISOString() })
+                            .eq('id_apoyo', u.id_apoyo)
+                    )
+                );
+
+                const updateConError = resultados.find(r => r.error);
+                if (updateConError?.error) {
+                    await logError(req, updateConError.error, 'ApoyoController', 'actualizarMontoExcel', 'apoyo', 'lApoyo');
+                    return res.status(500).json({
+                        message: "Error al actualizar los montos. Revise el log de errores.",
+                        detalle: updateConError.error.message
+                    });
+                }
+                actualizados = updatesAAplicar.length;
+            }
+
+            await logAudit(req, 'ACTUALIZAR_MONTO_EXCEL', 'tApoyo', null, {
+                actualizados,
+                errores: errorRows.length,
+                nombre_archivo: file.originalname
+            }, usuarioActual.id_usuario);
+
+            if (errorRows.length > 0) {
+                const finalHeaders = [...headersNormalizados, 'Atención'];
+                const errorIndexSet = new Map<number, string>();
+                errorRows.forEach(e => errorIndexSet.set(e.rowIndex, e.observaciones));
+
+                const dataRows: any[][] = [];
+                for (let i = HEADER_ROW_INDEX + 1; i < rawRows.length; i++) {
+                    const obs = errorIndexSet.get(i);
+                    if (!obs) continue;
+                    const row = rawRows[i] as any[];
+                    dataRows.push([...row, obs]);
+                }
+
+                const finalRows = [
+                    ...rawRows.slice(0, HEADER_ROW_INDEX),
+                    finalHeaders,
+                    ...dataRows
+                ];
+
+                const wsErr = XLSX.utils.aoa_to_sheet(finalRows);
+                const wbErr = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wbErr, wsErr, 'Errores');
+                const excelBuffer = XLSX.write(wbErr, { bookType: 'xlsx', type: 'buffer' });
+
+                res.setHeader('X-Import-Result', JSON.stringify({
+                    actualizados,
+                    errores: errorRows.length,
+                    total_procesados: actualizados + errorRows.length
+                }));
+                res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+                res.setHeader('Content-Disposition', `attachment; filename=errores-actualizacion-monto.xlsx`);
+                res.status(200).send(excelBuffer);
+                return;
+            }
+
+            res.status(200).json({
+                message: `Montos actualizados exitosamente. ${actualizados} registro(s) actualizado(s).`,
+                actualizados,
+                total: actualizados
+            });
+
+        } catch (err: any) {
+            await logError(req, err, 'ApoyoController', 'actualizarMontoExcel', 'apoyo', 'lApoyo');
             res.status(500).json({ error: "Error en el servidor al procesar el archivo" });
         }
     }
