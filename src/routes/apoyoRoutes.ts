@@ -1,8 +1,8 @@
 import { Router } from "express";
 import { apoyoController } from "../controllers/apoyoController";
-import { requireAdmin } from "../middlewares/requireAdminMiddleware";
 import { requireSupervisor } from "../middlewares/requireSupervisorMiddleware";
 import multer from "multer";
+import { requireAdminODependencia } from "../middlewares/requiereAdminDependenciaMiddleware";
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -18,8 +18,10 @@ class ApoyoRoutes {
         this.router.get("/pendientes", apoyoController.listarPendientes);
         this.router.get("/supervisor/otorgados", requireSupervisor, apoyoController.listarSupervisor);
         this.router.get("/supervisor/pendientes", requireSupervisor, apoyoController.listarPendientesSupervisor);
-        this.router.post('/importar', requireAdmin, upload.single('file'), apoyoController.importarExcel);
-        this.router.post('/importar-pendientes', requireAdmin, upload.single('file'), apoyoController.importarExcelPendientes);
+        this.router.get("/exportar-sin-monto", requireAdminODependencia, apoyoController.exportarSinMonto);
+        this.router.post("/actualizar-monto", requireAdminODependencia, upload.single('file'), apoyoController.actualizarMontoExcel);
+        this.router.post('/importar', requireAdminODependencia, upload.single('file'), apoyoController.importarExcel);
+        this.router.post('/importar-pendientes', requireAdminODependencia, upload.single('file'), apoyoController.importarExcelPendientes);
     }
 }
 
