@@ -32,6 +32,7 @@ CREATE TABLE apoyo."tApoyo" (
     monto NUMERIC(12,2) CHECK (monto IS NULL OR monto >= 0),  -- nullable: apoyo en especie
     fecha_apoyo DATE NULL,
     otorgado BOOLEAN NOT NULL DEFAULT false,
+    estatus VARCHAR(150) NULL,
 
     -- Auditoría de captura
     id_usuario_captura INT NOT NULL REFERENCES usuario."tUsuario"(id_usuario),
